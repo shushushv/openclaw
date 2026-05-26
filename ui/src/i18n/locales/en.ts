@@ -1285,6 +1285,7 @@ export const en: TranslationMap = {
       startTalk: "Start Talk",
       stillListening: "Still listening",
       talkTranscript: "Talk transcript",
+      startVideoTalk: "Start Video Talk",
       stopTalk: "Stop Talk",
     },
     selectors: {

@@ -3,6 +3,7 @@ import { RealtimeTalkPcmOutputQueue } from "./realtime-talk-pcm-output.ts";
 import {
   REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
   REALTIME_VOICE_AGENT_CONTROL_TOOL_NAME,
+  REALTIME_VOICE_DESCRIBE_VIEW_TOOL_NAME,
   submitRealtimeTalkAgentControl,
   submitRealtimeTalkConsult,
   type RealtimeTalkGatewayRelaySessionResult,
@@ -248,6 +249,14 @@ export class GatewayRelayRealtimeTalkTransport implements RealtimeTalkTransport 
         args: event.args ?? {},
         sessionId: this.session.relaySessionId,
         submit: (toolCallId, result) => this.submitToolResult(toolCallId, result),
+      });
+      return;
+    }
+    if (name === REALTIME_VOICE_DESCRIBE_VIEW_TOOL_NAME) {
+      // Path B (inline image injection) requires WebRTC transport; relay cannot forward raw
+      // conversation.item.create events with images. Return a graceful fallback.
+      this.submitToolResult(callId, {
+        error: "describe_view is only available in Video Talk (WebRTC) mode.",
       });
       return;
     }

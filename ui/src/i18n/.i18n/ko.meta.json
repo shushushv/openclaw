@@ -1,32 +1,13 @@
 {
   "fallbackKeys": [
-    "workboard.detailAddNote",
-    "workboard.detailAutomation",
-    "workboard.detailAutomationBoard",
-    "workboard.detailAutomationSkills",
-    "workboard.detailAutomationSummary",
-    "workboard.detailAutomationTenant",
-    "workboard.detailAutomationWorkspace",
-    "workboard.detailDiagnostics",
-    "workboard.detailNoNotes",
-    "workboard.detailNotePlaceholder",
-    "workboard.detailOperatorNotes",
-    "workboard.detailProof",
-    "workboard.detailRun",
-    "workboard.detailTask",
-    "workboard.detailTitle",
-    "workboard.detailUpdated",
-    "workboard.detailUpdatedValue",
-    "workboard.detailWorkerLogs",
-    "workboard.detailWorkerProtocol",
-    "workboard.viewDetails"
+    "chat.composer.startVideoTalk"
   ],
-  "generatedAt": "2026-06-01T02:32:30.911Z",
+  "generatedAt": "2026-05-25T10:48:48.110Z",
   "locale": "ko",
-  "model": "claude-opus-4-8",
+  "model": "claude-opus-4-7",
   "provider": "anthropic",
-  "sourceHash": "59589c3b29f7126995ed4763e88b763702a7c20b1791b4e16c62b394bca02d45",
-  "totalKeys": 1304,
-  "translatedKeys": 1284,
+  "sourceHash": "6bdfa480dbc0b9f83949a528b933f2152b8904c3dff98c4902d9ccc7c9d9d8ef",
+  "totalKeys": 1118,
+  "translatedKeys": 1117,
   "workflow": 1
 }
