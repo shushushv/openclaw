@@ -47,6 +47,7 @@ export function applyVolcengineToolSchemaCompat<T extends { compat?: ModelCompat
   };
 }
 
+export { buildVolcengineRealtimeVoiceProvider } from "./realtime-voice-provider.js";
 export { buildDoubaoCodingProvider, buildDoubaoProvider } from "./provider-catalog.js";
 export {
   buildDoubaoModelDefinition,

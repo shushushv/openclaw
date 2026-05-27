@@ -4,6 +4,7 @@ import { ensureModelAllowlistEntry } from "openclaw/plugin-sdk/provider-onboard"
 import { applyVolcengineToolSchemaCompat } from "./api.js";
 import { DOUBAO_CODING_MODEL_CATALOG, DOUBAO_MODEL_CATALOG } from "./models.js";
 import { buildDoubaoCodingProvider, buildDoubaoProvider } from "./provider-catalog.js";
+import { buildVolcengineRealtimeVoiceProvider } from "./realtime-voice-provider.js";
 import { buildVolcengineSpeechProvider } from "./speech-provider.js";
 
 const PROVIDER_ID = "volcengine";
@@ -83,5 +84,6 @@ export default definePluginEntry({
       normalizeResolvedModel: ({ model }) => applyVolcengineToolSchemaCompat(model),
     });
     api.registerSpeechProvider(buildVolcengineSpeechProvider());
+    api.registerRealtimeVoiceProvider(buildVolcengineRealtimeVoiceProvider());
   },
 });
