@@ -95,9 +95,6 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
     if (!navigator.mediaDevices?.getUserMedia || typeof WebSocket === "undefined") {
       throw new Error("Realtime Talk requires browser WebSocket and microphone access");
     }
-    if (this.session.protocol !== "google-live-bidi") {
-      throw new Error(`Unsupported realtime WebSocket protocol: ${this.session.protocol}`);
-    }
     const wsUrl = buildGoogleLiveUrl(this.session);
     this.closed = false;
     this.media = await navigator.mediaDevices.getUserMedia({ audio: true });

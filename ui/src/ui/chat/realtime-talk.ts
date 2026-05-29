@@ -3,6 +3,7 @@ import { normalizeTalkTransport } from "../../../../src/talk/talk-session-contro
 import type { GatewayBrowserClient } from "../gateway.ts";
 import { GatewayRelayRealtimeTalkTransport } from "./realtime-talk-gateway-relay.ts";
 import { GoogleLiveRealtimeTalkTransport } from "./realtime-talk-google-live.ts";
+import { PcmBinaryWebSocketRealtimeTalkTransport } from "./realtime-talk-pcm-binary.ts";
 import type {
   RealtimeTalkCallbacks,
   RealtimeTalkEvent,
@@ -34,7 +35,7 @@ export type RealtimeTalkLaunchOptions = {
   reasoningEffort?: string;
 };
 
-function createTransport(
+export function createTransport(
   session: RealtimeTalkSessionResult,
   ctx: RealtimeTalkTransportContext,
 ): RealtimeTalkTransport {
@@ -43,10 +44,11 @@ function createTransport(
     return new WebRtcSdpRealtimeTalkTransport(session as RealtimeTalkWebRtcSdpSessionResult, ctx);
   }
   if (transport === "provider-websocket") {
-    return new GoogleLiveRealtimeTalkTransport(
-      session as RealtimeTalkJsonPcmWebSocketSessionResult,
-      ctx,
-    );
+    const wsSession = session as RealtimeTalkJsonPcmWebSocketSessionResult;
+    if (wsSession.protocol === "pcm-binary") {
+      return new PcmBinaryWebSocketRealtimeTalkTransport(wsSession, ctx);
+    }
+    return new GoogleLiveRealtimeTalkTransport(wsSession, ctx);
   }
   if (transport === "gateway-relay") {
     return new GatewayRelayRealtimeTalkTransport(
