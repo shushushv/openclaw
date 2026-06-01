@@ -97,9 +97,17 @@ export type RealtimeTalkSessionResult =
   | RealtimeTalkGatewayRelaySessionResult
   | RealtimeTalkManagedRoomSessionResult;
 
+// mimeType 全链路统一 "image/jpeg"，不开放 PNG（简化 adapter 和 schema）
+export type VideoFrame = { data: string; mimeType: "image/jpeg" };
+export type VideoMode = "active" | "passive";
+// null = 跳过本帧（权限拒绝、摄像头未就绪等）
+export type VideoCaptureCallback = () => Promise<VideoFrame | null>;
+
 export type RealtimeTalkTransport = {
   start(): Promise<void>;
   stop(): void;
+  appendVideoFrame?(frame: VideoFrame): Promise<void> | void;
+  supportsVideoMode?(mode: VideoMode): boolean;
 };
 
 export type RealtimeTalkTransportContext = {
@@ -109,7 +117,27 @@ export type RealtimeTalkTransportContext = {
   consultThinkingLevel?: string;
   consultFastMode?: boolean;
   videoEnabled?: boolean;
+  videoMode?: VideoMode;
+  captureVideoFrame?: VideoCaptureCallback;
 };
+
+export class VideoFrameThrottle {
+  private lastData: string | null = null;
+  readonly intervalMs: number;
+
+  constructor(fps = 1) {
+    this.intervalMs = 1000 / fps;
+  }
+
+  // Returns true if frame content is unchanged (static frame) and should be skipped.
+  shouldSkip(frame: VideoFrame): boolean {
+    if (frame.data === this.lastData) {
+      return true;
+    }
+    this.lastData = frame.data;
+    return false;
+  }
+}
 
 export function createRealtimeTalkEventEmitter(
   ctx: RealtimeTalkTransportContext,

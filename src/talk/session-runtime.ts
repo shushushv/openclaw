@@ -33,6 +33,7 @@ export type RealtimeVoiceBridgeSession = {
   setMediaTimestamp(ts: number): void;
   submitToolResult(callId: string, result: unknown, options?: RealtimeVoiceToolResultOptions): void;
   triggerGreeting(instructions?: string): void;
+  appendVideoFrame?(frame: { data: string; mimeType: string }): Promise<void> | void;
 };
 
 export type RealtimeVoiceBridgeSessionParams = {
@@ -133,6 +134,11 @@ export function createRealtimeVoiceBridgeSession(
     onClose: params.onClose,
   });
   bridgeRef.current = bridge;
+  // Only mount appendVideoFrame when the bridge supports it; relay uses
+  // `typeof session.appendVideoFrame === "function"` to determine capability.
+  if (bridge.appendVideoFrame) {
+    session.appendVideoFrame = (frame) => bridge.appendVideoFrame!(frame);
+  }
 
   return session;
 }

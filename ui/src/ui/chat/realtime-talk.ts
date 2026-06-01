@@ -12,7 +12,11 @@ import type {
   RealtimeTalkTransport,
   RealtimeTalkTransportContext,
   RealtimeTalkWebRtcSdpSessionResult,
+  VideoCaptureCallback,
+  VideoFrame,
+  VideoMode,
 } from "./realtime-talk-shared.ts";
+import { VideoFrameThrottle } from "./realtime-talk-shared.ts";
 import { WebRtcSdpRealtimeTalkTransport } from "./realtime-talk-webrtc.ts";
 
 export type {
@@ -20,6 +24,9 @@ export type {
   RealtimeTalkEvent,
   RealtimeTalkSessionResult,
   RealtimeTalkStatus,
+  VideoCaptureCallback,
+  VideoFrame,
+  VideoMode,
 };
 
 export type RealtimeTalkLaunchOptions = {
@@ -32,6 +39,8 @@ export type RealtimeTalkLaunchOptions = {
   prefixPaddingMs?: number;
   reasoningEffort?: string;
   videoEnabled?: boolean;
+  videoMode?: VideoMode;
+  captureVideoFrame?: VideoCaptureCallback;
 };
 
 function createTransport(
@@ -65,7 +74,11 @@ function resolveTransport(session: RealtimeTalkSessionResult): string {
   return normalizeTalkTransport((session as { transport?: string }).transport) ?? "webrtc";
 }
 
-const CLIENT_ONLY_LAUNCH_KEYS = new Set<keyof RealtimeTalkLaunchOptions>(["videoEnabled"]);
+const CLIENT_ONLY_LAUNCH_KEYS = new Set<keyof RealtimeTalkLaunchOptions>([
+  "videoEnabled",
+  "videoMode",
+  "captureVideoFrame",
+]);
 
 function compactLaunchParams(
   params: RealtimeTalkLaunchOptions & { sessionKey: string; mode?: string; brain?: string },
@@ -81,6 +94,9 @@ function compactLaunchParams(
 export class RealtimeTalkSession {
   private transport: RealtimeTalkTransport | null = null;
   private closed = false;
+  private activeVideoTimer: ReturnType<typeof setInterval> | null = null;
+  private videoInFlight = false;
+  private lastVideoFramePromise: Promise<void> | null = null;
 
   constructor(
     private readonly client: GatewayBrowserClient,
@@ -103,8 +119,44 @@ export class RealtimeTalkSession {
       consultThinkingLevel: session.consultThinkingLevel,
       consultFastMode: session.consultFastMode,
       videoEnabled: this.options.videoEnabled,
+      videoMode: this.options.videoMode,
+      captureVideoFrame: this.options.captureVideoFrame,
     });
     await this.transport.start();
+    if (this.options.videoMode === "active" && this.options.captureVideoFrame) {
+      this.startActiveVideoTimer();
+    }
+  }
+
+  private startActiveVideoTimer(): void {
+    const throttle = new VideoFrameThrottle(1);
+    this.activeVideoTimer = setInterval(() => {
+      void this.tickActiveVideo(throttle);
+    }, throttle.intervalMs);
+  }
+
+  private async tickActiveVideo(throttle: VideoFrameThrottle): Promise<void> {
+    if (
+      this.videoInFlight ||
+      !this.transport?.appendVideoFrame ||
+      !this.options.captureVideoFrame
+    ) {
+      return;
+    }
+    this.videoInFlight = true;
+    const framePromise = (async () => {
+      try {
+        const frame = await this.options.captureVideoFrame!();
+        if (!frame || throttle.shouldSkip(frame) || !this.transport?.appendVideoFrame) {
+          return;
+        }
+        await this.transport.appendVideoFrame(frame);
+      } finally {
+        this.videoInFlight = false;
+      }
+    })();
+    this.lastVideoFramePromise = framePromise;
+    await framePromise;
   }
 
   private async createSession(): Promise<RealtimeTalkSessionResult> {
@@ -139,8 +191,24 @@ export class RealtimeTalkSession {
 
   stop(): void {
     this.closed = true;
+    // Stop the active video timer first so no new frames are dispatched.
+    if (this.activeVideoTimer !== null) {
+      clearInterval(this.activeVideoTimer);
+      this.activeVideoTimer = null;
+    }
     this.callbacks.onStatus?.("idle");
-    this.transport?.stop();
-    this.transport = null;
+    // Best-effort wait for the in-flight frame (short timeout to avoid blocking stop).
+    const lastFrame = this.lastVideoFramePromise;
+    this.lastVideoFramePromise = null;
+    if (lastFrame) {
+      const timeout = new Promise<void>((resolve) => setTimeout(resolve, 500));
+      void Promise.race([lastFrame, timeout]).finally(() => {
+        this.transport?.stop();
+        this.transport = null;
+      });
+    } else {
+      this.transport?.stop();
+      this.transport = null;
+    }
   }
 }

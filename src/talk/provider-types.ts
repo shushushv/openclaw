@@ -193,6 +193,8 @@ export type RealtimeVoiceBridge = {
   acknowledgeMark(): void;
   close(): void;
   isConnected(): boolean;
+  // data = raw base64, adapter converts to provider-specific format
+  appendVideoFrame?(frame: { data: string; mimeType: string }): Promise<void> | void;
 };
 
 export type RealtimeVoiceBargeInOptions = {

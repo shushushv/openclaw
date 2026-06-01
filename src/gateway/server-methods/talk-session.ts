@@ -7,6 +7,7 @@ import {
   errorShape,
   formatValidationErrors,
   validateTalkSessionAppendAudioParams,
+  validateTalkSessionAppendVideoParams,
   validateTalkSessionCancelOutputParams,
   validateTalkSessionCancelTurnParams,
   validateTalkSessionCloseParams,
@@ -35,6 +36,7 @@ import {
   type TalkHandoffTurnResult,
 } from "../talk-handoff.js";
 import {
+  appendVideoToRelaySession,
   cancelTalkRealtimeRelayTurn,
   createTalkRealtimeRelaySession,
   sendTalkRealtimeRelayAudio,
@@ -322,7 +324,11 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
           provider: resolution.provider,
           providerConfig: withRealtimeBrowserOverrides(resolution.providerConfig, launchOptions),
           instructions: buildRealtimeInstructions(realtimeConfig.instructions),
-          tools: [REALTIME_VOICE_AGENT_CONSULT_TOOL, REALTIME_VOICE_AGENT_CONTROL_TOOL, REALTIME_VOICE_DESCRIBE_VIEW_TOOL],
+          tools: [
+            REALTIME_VOICE_AGENT_CONSULT_TOOL,
+            REALTIME_VOICE_AGENT_CONTROL_TOOL,
+            REALTIME_VOICE_DESCRIBE_VIEW_TOOL,
+          ],
           model: launchOptions.model,
           sessionKey: normalizeOptionalString(params.sessionKey),
           voice: launchOptions.voice,
@@ -497,6 +503,42 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
           "talk.session.appendAudio is not supported for managed-room sessions",
         ),
       );
+    } catch (err) {
+      respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, formatForLog(err)));
+    }
+  },
+  "talk.session.appendVideo": async ({ params, respond, client }) => {
+    if (!validateTalkSessionAppendVideoParams(params)) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid talk.session.appendVideo params: ${formatValidationErrors(validateTalkSessionAppendVideoParams.errors)}`,
+        ),
+      );
+      return;
+    }
+    try {
+      const session = getUnifiedTalkSession(params.sessionId);
+      if (session.kind !== "realtime-relay") {
+        respond(
+          false,
+          undefined,
+          errorShape(
+            ErrorCodes.INVALID_REQUEST,
+            "talk.session.appendVideo is only supported for realtime relay sessions",
+          ),
+        );
+        return;
+      }
+      const connId = requireUnifiedTalkSessionConn(session, client?.connId);
+      const result = await appendVideoToRelaySession({
+        relaySessionId: session.relaySessionId,
+        connId,
+        frame: params.frame,
+      });
+      respond(true, result, undefined);
     } catch (err) {
       respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, formatForLog(err)));
     }

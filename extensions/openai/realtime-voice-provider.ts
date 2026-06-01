@@ -522,6 +522,24 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
     this.markQueue.shift();
   }
 
+  appendVideoFrame(frame: { data: string; mimeType: string }): void {
+    // Inject image into conversation; do NOT call requestResponseCreate so active
+    // push does not trigger a new model response (VAD handles that).
+    this.sendEvent({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_image",
+            image_url: `data:${frame.mimeType};base64,${frame.data}`,
+          },
+        ],
+      },
+    });
+  }
+
   close(): void {
     this.intentionallyClosed = true;
     this.connected = false;

@@ -59,6 +59,7 @@ describe("method scope resolution", () => {
     ["talk.session.create", ["operator.write"]],
     ["talk.session.join", ["operator.write"]],
     ["talk.session.appendAudio", ["operator.write"]],
+    ["talk.session.appendVideo", ["operator.write"]],
     ["talk.session.startTurn", ["operator.write"]],
     ["talk.session.endTurn", ["operator.write"]],
     ["talk.session.cancelTurn", ["operator.write"]],

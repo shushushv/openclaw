@@ -275,6 +275,20 @@ export const TalkSessionAppendAudioParamsSchema = Type.Object(
   { additionalProperties: false },
 );
 
+export const TalkSessionAppendVideoParamsSchema = Type.Object(
+  {
+    sessionId: NonEmptyString,
+    frame: Type.Object(
+      {
+        data: NonEmptyString,
+        mimeType: Type.Literal("image/jpeg"),
+      },
+      { additionalProperties: false },
+    ),
+  },
+  { additionalProperties: false },
+);
+
 export const TalkSessionTurnParamsSchema = Type.Object(
   {
     sessionId: NonEmptyString,

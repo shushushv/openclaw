@@ -22,6 +22,7 @@ import {
   validateTalkClientToolCallParams,
   validateTalkAgentControlResult,
   validateTalkSessionAppendAudioParams,
+  validateTalkSessionAppendVideoParams,
   validateTalkSessionCancelOutputParams,
   validateTalkSessionCancelTurnParams,
   validateTalkSessionCreateParams,
@@ -545,6 +546,53 @@ describe("validateTalkSessionRelayParams", () => {
         options: { suppressResponse: true, willContinue: true },
       }),
     ).toBe(true);
+  });
+});
+
+describe("validateTalkSessionAppendVideoParams", () => {
+  it("accepts valid video params", () => {
+    expect(
+      validateTalkSessionAppendVideoParams({
+        sessionId: "session-1",
+        frame: { data: "/9j/abc123", mimeType: "image/jpeg" },
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects missing sessionId", () => {
+    expect(
+      validateTalkSessionAppendVideoParams({
+        frame: { data: "/9j/abc123", mimeType: "image/jpeg" },
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects wrong mimeType", () => {
+    expect(
+      validateTalkSessionAppendVideoParams({
+        sessionId: "session-1",
+        frame: { data: "/9j/abc123", mimeType: "image/png" },
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects missing frame data", () => {
+    expect(
+      validateTalkSessionAppendVideoParams({
+        sessionId: "session-1",
+        frame: { mimeType: "image/jpeg" },
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects additional properties", () => {
+    expect(
+      validateTalkSessionAppendVideoParams({
+        sessionId: "session-1",
+        frame: { data: "/9j/abc123", mimeType: "image/jpeg" },
+        extra: "field",
+      }),
+    ).toBe(false);
   });
 });
 

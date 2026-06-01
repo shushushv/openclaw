@@ -125,6 +125,7 @@ type GoogleLiveSession = {
   sendRealtimeInput: (params: {
     audio?: { data: string; mimeType: string };
     audioStreamEnd?: boolean;
+    video?: { data: string; mimeType: string };
   }) => void;
   sendToolResponse: (params: { functionResponses: FunctionResponse[] | FunctionResponse }) => void;
   close: () => void;
@@ -639,6 +640,11 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
   }
 
   acknowledgeMark(): void {}
+
+  appendVideoFrame(frame: { data: string; mimeType: string }): void {
+    // raw base64, Gemini Live accepts it directly on the video channel
+    this.session?.sendRealtimeInput({ video: { data: frame.data, mimeType: frame.mimeType } });
+  }
 
   close(): void {
     this.intentionallyClosed = true;

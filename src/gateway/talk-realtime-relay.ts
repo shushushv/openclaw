@@ -106,6 +106,7 @@ type RelaySession = {
   completedAgentToolCalls: Set<string>;
   forcedConsults: RealtimeVoiceForcedConsultCoordinator;
   transcript: RealtimeVoiceTranscriptEntry[];
+  unsupportedVideoWarnedAt?: number;
 };
 
 type CreateTalkRealtimeRelaySessionParams = {
@@ -912,6 +913,28 @@ export function stopTalkRealtimeRelaySession(params: {
 }): void {
   const session = getRelaySession(params.relaySessionId, params.connId);
   closeRelaySession(session, "completed");
+}
+
+export async function appendVideoToRelaySession(params: {
+  relaySessionId: string;
+  connId: string;
+  frame: { data: string; mimeType: string };
+}): Promise<{ ok: true } | { ok: false; reason: "unsupported" }> {
+  const session = getRelaySession(params.relaySessionId, params.connId);
+  if (typeof session.bridge.appendVideoFrame !== "function") {
+    // Rate-limited warn so the user can observe the unsupported state without log spam.
+    session.unsupportedVideoWarnedAt ??= 0;
+    const now = Date.now();
+    if (now - session.unsupportedVideoWarnedAt > 30_000) {
+      session.unsupportedVideoWarnedAt = now;
+      console.warn(
+        `[talk-relay] appendVideo called but provider bridge does not support appendVideoFrame (session=${params.relaySessionId})`,
+      );
+    }
+    return { ok: false, reason: "unsupported" };
+  }
+  await session.bridge.appendVideoFrame(params.frame);
+  return { ok: true };
 }
 
 export function clearTalkRealtimeRelaySessionsForTest(): void {

@@ -84,6 +84,8 @@ import {
   TalkConfigResultSchema,
   type TalkSessionAppendAudioParams,
   TalkSessionAppendAudioParamsSchema,
+  type TalkSessionAppendVideoParams,
+  TalkSessionAppendVideoParamsSchema,
   type TalkSessionCancelOutputParams,
   TalkSessionCancelOutputParamsSchema,
   type TalkSessionCancelTurnParams,
@@ -703,6 +705,9 @@ export const validateTalkSessionJoinResult = lazyCompile<TalkSessionJoinResult>(
 export const validateTalkSessionAppendAudioParams = lazyCompile<TalkSessionAppendAudioParams>(
   TalkSessionAppendAudioParamsSchema,
 );
+export const validateTalkSessionAppendVideoParams = lazyCompile<TalkSessionAppendVideoParams>(
+  TalkSessionAppendVideoParamsSchema,
+);
 export const validateTalkSessionTurnParams = lazyCompile<TalkSessionTurnParams>(
   TalkSessionTurnParamsSchema,
 );
@@ -1028,6 +1033,7 @@ export {
   TalkConfigParamsSchema,
   TalkConfigResultSchema,
   TalkSessionAppendAudioParamsSchema,
+  TalkSessionAppendVideoParamsSchema,
   TalkSessionCancelOutputParamsSchema,
   TalkSessionCancelTurnParamsSchema,
   TalkSessionCreateParamsSchema,
@@ -1178,6 +1184,7 @@ export type {
   TalkConfigParams,
   TalkConfigResult,
   TalkSessionAppendAudioParams,
+  TalkSessionAppendVideoParams,
   TalkSessionCancelOutputParams,
   TalkSessionCancelTurnParams,
   TalkSessionCreateParams,
