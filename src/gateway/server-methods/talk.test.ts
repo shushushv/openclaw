@@ -1,7 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorCodes } from "../../../packages/gateway-protocol/src/index.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { normalizeResolvedSecretInputString } from "../../config/types.secrets.js";
+import {
+  clearUnifiedTalkSessionsForTest,
+  rememberUnifiedTalkSession,
+} from "../talk-session-registry.js";
 import { talkHandlers } from "./talk.js";
 
 const mocks = vi.hoisted(() => ({
@@ -17,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   listRealtimeVoiceProviders: vi.fn(() => []),
   listRealtimeTranscriptionProviders: vi.fn(() => []),
   resolveConfiguredRealtimeVoiceProvider: vi.fn(),
+  appendVideoToRelaySession: vi.fn(),
   createTalkRealtimeRelaySession: vi.fn(),
   sendTalkRealtimeRelayAudio: vi.fn(),
   cancelTalkRealtimeRelayTurn: vi.fn(),
@@ -80,6 +85,7 @@ vi.mock("../talk-realtime-relay.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../talk-realtime-relay.js")>();
   return {
     ...actual,
+    appendVideoToRelaySession: mocks.appendVideoToRelaySession,
     cancelTalkRealtimeRelayTurn: mocks.cancelTalkRealtimeRelayTurn,
     createTalkRealtimeRelaySession: mocks.createTalkRealtimeRelaySession,
     registerTalkRealtimeRelayAgentRun: mocks.registerTalkRealtimeRelayAgentRun,
@@ -1949,5 +1955,83 @@ describe("talk.client.create handler", () => {
     expectRespondError(respond, {
       message: 'talk.client.create only supports brain="agent-consult"',
     });
+  });
+});
+
+describe("talk.session.appendVideo handler", () => {
+  afterEach(() => {
+    clearUnifiedTalkSessionsForTest();
+    vi.clearAllMocks();
+  });
+
+  it("forwards to relay and responds ok:true when bridge supports video", async () => {
+    rememberUnifiedTalkSession("vid-session-1", {
+      kind: "realtime-relay",
+      connId: "conn-1",
+      relaySessionId: "relay-vid-1",
+    });
+    mocks.appendVideoToRelaySession.mockResolvedValue({ ok: true });
+    const respond = vi.fn();
+    await talkHandlers["talk.session.appendVideo"]({
+      req: { type: "req", id: "1", method: "talk.session.appendVideo" },
+      params: { sessionId: "vid-session-1", frame: { data: "/9j/abc", mimeType: "image/jpeg" } },
+      client: { connId: "conn-1" } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: {} as never,
+    });
+    expect(mocks.appendVideoToRelaySession).toHaveBeenCalledWith({
+      relaySessionId: "relay-vid-1",
+      connId: "conn-1",
+      frame: { data: "/9j/abc", mimeType: "image/jpeg" },
+    });
+    expectRespondOk(respond, { ok: true });
+  });
+
+  it("responds ok:false reason:unsupported when bridge does not support video", async () => {
+    rememberUnifiedTalkSession("vid-session-2", {
+      kind: "realtime-relay",
+      connId: "conn-1",
+      relaySessionId: "relay-vid-2",
+    });
+    mocks.appendVideoToRelaySession.mockResolvedValue({ ok: false, reason: "unsupported" });
+    const respond = vi.fn();
+    await talkHandlers["talk.session.appendVideo"]({
+      req: { type: "req", id: "1", method: "talk.session.appendVideo" },
+      params: { sessionId: "vid-session-2", frame: { data: "/9j/abc", mimeType: "image/jpeg" } },
+      client: { connId: "conn-1" } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: {} as never,
+    });
+    expectRespondOk(respond, { ok: false, reason: "unsupported" });
+  });
+
+  it("responds with protocol error when sessionId does not exist", async () => {
+    const respond = vi.fn();
+    await talkHandlers["talk.session.appendVideo"]({
+      req: { type: "req", id: "1", method: "talk.session.appendVideo" },
+      params: { sessionId: "no-such-session", frame: { data: "/9j/abc", mimeType: "image/jpeg" } },
+      client: { connId: "conn-1" } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: {} as never,
+    });
+    expectRespondError(respond, { code: ErrorCodes.UNAVAILABLE });
+  });
+
+  it("responds with protocol error when params fail schema validation", async () => {
+    const respond = vi.fn();
+    await talkHandlers["talk.session.appendVideo"]({
+      req: { type: "req", id: "1", method: "talk.session.appendVideo" },
+      params: { sessionId: "session-1" }, // missing frame
+      client: { connId: "conn-1" } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: {} as never,
+    });
+
+    const err = expectRespondError(respond, { code: ErrorCodes.INVALID_REQUEST });
+    expect(String(err.message)).toContain("invalid talk.session.appendVideo params");
   });
 });
