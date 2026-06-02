@@ -67,6 +67,41 @@ import { resolveLocalUserName } from "../user-identity.ts";
 import { renderMarkdownSidebar } from "./markdown-sidebar.ts";
 import "../components/resizable-divider.ts";
 
+const _videoDragSetup = new WeakSet<HTMLVideoElement>();
+
+function attachVideoDrag(el: Element | undefined) {
+  if (!(el instanceof HTMLVideoElement)) return;
+  if (_videoDragSetup.has(el)) return;
+  _videoDragSetup.add(el);
+
+  const video: HTMLVideoElement = el;
+  let startClientX = 0;
+  let startClientY = 0;
+  let startRight = 0;
+  let startBottom = 0;
+
+  function onMove(e: MouseEvent) {
+    video.style.right = `${Math.max(0, startRight - (e.clientX - startClientX))}px`;
+    video.style.bottom = `${Math.max(0, startBottom - (e.clientY - startClientY))}px`;
+  }
+
+  function onUp() {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+  }
+
+  video.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    startClientX = e.clientX;
+    startClientY = e.clientY;
+    const rect = video.getBoundingClientRect();
+    startRight = window.innerWidth - rect.right;
+    startBottom = window.innerHeight - rect.bottom;
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+}
+
 const COMPOSER_CHROME_INTERACTIVE_SELECTOR = [
   "a[href]",
   "button",
@@ -106,6 +141,7 @@ export type ChatProps = {
   draft: string;
   queue: ChatQueueItem[];
   realtimeTalkActive?: boolean;
+  realtimeTalkMode?: "audio" | "video" | null;
   realtimeTalkStatus?: RealtimeTalkStatus;
   realtimeTalkDetail?: string | null;
   realtimeTalkTranscript?: string | null;
@@ -121,6 +157,7 @@ export type ChatProps = {
     silenceDurationMs: string;
     prefixPaddingMs: string;
     reasoningEffort: string;
+    videoMode: string;
   };
   connected: boolean;
   canSend: boolean;
@@ -228,6 +265,10 @@ const TALK_TRANSPORT_OPTIONS: TalkSelectOption[] = [
   { label: "WebRTC", value: "webrtc" },
   { label: "Gateway relay", value: "gateway-relay" },
   { label: "Provider WebSocket", value: "provider-websocket" },
+];
+const TALK_VIDEO_MODE_OPTIONS: TalkSelectOption[] = [
+  { label: "Passive", value: "passive" },
+  { label: "Active", value: "active" },
 ];
 const TALK_REASONING_OPTIONS: TalkSelectOption[] = [
   { label: "Default", value: "" },
@@ -385,6 +426,12 @@ function renderRealtimeTalkOptions(props: ChatProps) {
             value: options.reasoningEffort,
             options: TALK_REASONING_OPTIONS,
             onSelect: (reasoningEffort) => onChange({ reasoningEffort }),
+          })}
+          ${renderTalkSelect({
+            label: "Video mode",
+            value: options.videoMode,
+            options: TALK_VIDEO_MODE_OPTIONS,
+            onSelect: (videoMode) => onChange({ videoMode }),
           })}
           <label class="agent-chat__talk-field">
             <span>Exact VAD</span>
@@ -1382,6 +1429,9 @@ export function renderChat(props: ChatProps) {
   const compactBusy =
     props.compactionStatus?.phase === "active" || props.compactionStatus?.phase === "retrying";
   const activeSession = props.sessions?.sessions?.find((row) => row.key === props.sessionKey);
+  const realtimeTalkMode = props.realtimeTalkActive ? (props.realtimeTalkMode ?? "audio") : null;
+  const realtimeAudioActive = realtimeTalkMode === "audio";
+  const realtimeVideoActive = realtimeTalkMode === "video";
   const reasoningLevel = activeSession?.reasoningLevel ?? "off";
   const showReasoning = props.showThinking && reasoningLevel !== "off";
   const assistantIdentity = {
@@ -1888,26 +1938,12 @@ export function renderChat(props: ChatProps) {
               <div class="agent-chat__stt-interim agent-chat__talk-status">
                 ${props.realtimeTalkVideoStream
                   ? html`<video
+                      ${ref(attachVideoDrag)}
                       class="agent-chat__talk-video-pip-source"
                       autoplay
                       muted
                       playsinline
                       .srcObject=${props.realtimeTalkVideoStream}
-                      @play=${async (e: Event) => {
-                        const video = e.target as HTMLVideoElement;
-                        if (document.pictureInPictureEnabled && !document.pictureInPictureElement) {
-                          const entered = await video.requestPictureInPicture().then(
-                            () => true,
-                            () => false,
-                          );
-                          if (entered) {
-                            return;
-                          }
-                        }
-                        // PiP not supported or failed — fall back to inline preview
-                        video.classList.add("agent-chat__talk-video-inline");
-                        video.parentElement?.classList.add("agent-chat__talk-status--video");
-                      }}
                     ></video>`
                   : nothing}
                 <span class="agent-chat__talk-status-text">
@@ -1969,37 +2005,53 @@ export function renderChat(props: ChatProps) {
             ${props.onToggleRealtimeTalk
               ? html`
                   <button
-                    class="agent-chat__input-btn ${props.realtimeTalkActive
+                    class="agent-chat__input-btn ${realtimeAudioActive
                       ? "agent-chat__input-btn--talk"
                       : ""}"
                     @click=${props.onToggleRealtimeTalk}
-                    title=${props.realtimeTalkActive
+                    title=${realtimeAudioActive
                       ? t("chat.composer.stopTalk")
-                      : t("chat.composer.startTalk")}
+                      : realtimeVideoActive
+                        ? "Stop Video Talk before starting Talk"
+                        : t("chat.composer.startTalk")}
                     aria-label=${props.realtimeTalkActive
-                      ? t("chat.composer.stopTalk")
+                      ? realtimeAudioActive
+                        ? t("chat.composer.stopTalk")
+                        : "Talk unavailable during Video Talk"
                       : t("chat.composer.startTalk")}
-                    ?disabled=${!props.connected}
+                    ?disabled=${!props.connected || realtimeVideoActive}
                   >
-                    ${props.realtimeTalkActive ? icons.volume2 : icons.mic}
+                    ${realtimeAudioActive ? icons.volume2 : icons.mic}
                     <span class="agent-chat__control-label"
-                      >${props.realtimeTalkActive
+                      >${realtimeAudioActive
                         ? t("chat.composer.stopTalk")
                         : t("chat.composer.startTalk")}</span
                     >
                   </button>
-                  ${!props.realtimeTalkActive && props.onToggleRealtimeTalkWithVideo
+                  ${props.onToggleRealtimeTalkWithVideo
                     ? html`
                         <button
-                          class="agent-chat__input-btn"
+                          class="agent-chat__input-btn ${realtimeVideoActive
+                            ? "agent-chat__input-btn--talk"
+                            : ""}"
                           @click=${props.onToggleRealtimeTalkWithVideo}
-                          title=${t("chat.composer.startVideoTalk")}
-                          aria-label=${t("chat.composer.startVideoTalk")}
-                          ?disabled=${!props.connected}
+                          title=${realtimeVideoActive
+                            ? t("chat.composer.stopTalk")
+                            : realtimeAudioActive
+                              ? "Stop Talk before starting Video Talk"
+                              : t("chat.composer.startVideoTalk")}
+                          aria-label=${props.realtimeTalkActive
+                            ? realtimeVideoActive
+                              ? t("chat.composer.stopTalk")
+                              : "Video Talk unavailable during Talk"
+                            : t("chat.composer.startVideoTalk")}
+                          ?disabled=${!props.connected || realtimeAudioActive}
                         >
                           ${icons.video}
                           <span class="agent-chat__control-label"
-                            >${t("chat.composer.startVideoTalk")}</span
+                            >${realtimeVideoActive
+                              ? t("chat.composer.stopTalk")
+                              : t("chat.composer.startVideoTalk")}</span
                           >
                         </button>
                       `
@@ -2009,7 +2061,9 @@ export function renderChat(props: ChatProps) {
                       ? "agent-chat__input-btn--talk"
                       : ""}"
                     @click=${props.onToggleRealtimeTalkOptions}
-                    title="Talk settings"
+                    title=${props.realtimeTalkActive
+                      ? "Stop Talk to change settings"
+                      : "Talk settings"}
                     aria-label="Talk settings"
                     aria-expanded=${props.realtimeTalkOptionsOpen ? "true" : "false"}
                     ?disabled=${!props.connected || props.realtimeTalkActive}

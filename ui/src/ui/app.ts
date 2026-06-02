@@ -78,10 +78,12 @@ import {
   type RealtimeTalkConversationEntry,
   type RealtimeTalkConversationState,
 } from "./chat/realtime-talk-conversation.ts";
+import { captureFrameFromVideoStream } from "./chat/realtime-talk-shared.ts";
 import {
   RealtimeTalkSession,
   type RealtimeTalkLaunchOptions,
   type RealtimeTalkStatus,
+  type VideoFrame,
 } from "./chat/realtime-talk.ts";
 import type { ChatRunUiStatus } from "./chat/run-lifecycle.ts";
 import type { ChatSideResult } from "./chat/side-result.ts";
@@ -297,6 +299,7 @@ export class OpenClawApp extends LitElement {
   @state() chatQueueBySession: Record<string, ChatQueueItem[]> = {};
   @state() chatAttachments: ChatAttachment[] = [];
   @state() realtimeTalkActive = false;
+  @state() realtimeTalkMode: "audio" | "video" | null = null;
   @state() realtimeTalkStatus: RealtimeTalkStatus = "idle";
   @state() realtimeTalkDetail: string | null = null;
   @state() realtimeTalkTranscript: string | null = null;
@@ -312,8 +315,10 @@ export class OpenClawApp extends LitElement {
     silenceDurationMs: "",
     prefixPaddingMs: "",
     reasoningEffort: "",
+    videoMode: "passive",
   };
   private realtimeTalkSession: RealtimeTalkSession | null = null;
+  private realtimeTalkCameraStream: MediaStream | null = null;
   private realtimeTalkConversationState: RealtimeTalkConversationState =
     createRealtimeTalkConversationState();
   private nativeBridgeCleanup: (() => void) | null = null;
@@ -1162,6 +1167,9 @@ export class OpenClawApp extends LitElement {
       return Number.isFinite(parsed) ? parsed : undefined;
     };
     const transport = text(options.transport) as RealtimeTalkLaunchOptions["transport"] | undefined;
+    const rawVideoMode = text(options.videoMode);
+    const videoMode =
+      rawVideoMode === "active" || rawVideoMode === "passive" ? rawVideoMode : undefined;
     return {
       provider: text(options.provider),
       model: text(options.model),
@@ -1171,10 +1179,13 @@ export class OpenClawApp extends LitElement {
       silenceDurationMs: number(options.silenceDurationMs),
       prefixPaddingMs: number(options.prefixPaddingMs),
       reasoningEffort: text(options.reasoningEffort),
+      videoMode,
     };
   }
 
-  async toggleRealtimeTalk(opts?: Pick<RealtimeTalkLaunchOptions, "videoEnabled" | "transport">) {
+  async toggleRealtimeTalk(
+    opts?: Pick<RealtimeTalkLaunchOptions, "videoEnabled" | "transport" | "videoMode">,
+  ) {
     if (this.realtimeTalkSession) {
       if (this.realtimeTalkStatus === "error") {
         this.realtimeTalkSession.stop();
@@ -1183,9 +1194,11 @@ export class OpenClawApp extends LitElement {
         this.realtimeTalkSession.stop();
         this.realtimeTalkSession = null;
         this.realtimeTalkActive = false;
+        this.realtimeTalkMode = null;
         this.realtimeTalkStatus = "idle";
         this.realtimeTalkDetail = null;
         this.realtimeTalkTranscript = null;
+        this.stopRealtimeTalkCamera();
         this.resetRealtimeTalkConversation();
         return;
       }
@@ -1196,10 +1209,34 @@ export class OpenClawApp extends LitElement {
       return;
     }
     this.realtimeTalkActive = true;
+    this.realtimeTalkMode = opts?.videoEnabled ? "video" : "audio";
     this.realtimeTalkStatus = "connecting";
     this.realtimeTalkDetail = null;
     this.realtimeTalkTranscript = null;
     this.resetRealtimeTalkConversation();
+
+    // For non-WebRTC transports, open the camera here so PiP appears before the session
+    // connects and captureVideoFrame has a live stream to draw from.
+    const resolvedTransport =
+      opts?.transport ?? this.buildRealtimeTalkLaunchOptions().transport ?? "gateway-relay";
+    if (opts?.videoEnabled && resolvedTransport !== "webrtc") {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        this.realtimeTalkCameraStream = stream;
+        this.realtimeTalkVideoStream = stream;
+      } catch {
+        // Camera permission denied — continue as audio-only, UI reflects no stream
+      }
+    }
+
+    const captureVideoFrame = opts?.videoEnabled
+      ? async (): Promise<VideoFrame | null> => {
+          if (!this.realtimeTalkCameraStream) return null;
+          const data = await captureFrameFromVideoStream(this.realtimeTalkCameraStream);
+          return data ? { data, mimeType: "image/jpeg" as const } : null;
+        }
+      : undefined;
+
     const session = new RealtimeTalkSession(
       this.client,
       this.sessionKey,
@@ -1209,6 +1246,10 @@ export class OpenClawApp extends LitElement {
           this.realtimeTalkDetail = detail ?? null;
           if (status === "idle" || status === "error") {
             this.realtimeTalkActive = status !== "idle";
+            if (status === "idle") {
+              this.realtimeTalkMode = null;
+              this.stopRealtimeTalkCamera();
+            }
           }
           if (status === "error" && this.realtimeTalkDetail) {
             this.lastError = this.realtimeTalkDetail;
@@ -1224,18 +1265,12 @@ export class OpenClawApp extends LitElement {
           this.realtimeTalkConversation = this.realtimeTalkConversationState.entries;
         },
         onVideoStream: (stream) => {
-          if (
-            !stream &&
-            document.pictureInPictureElement?.classList.contains(
-              "agent-chat__talk-video-pip-source",
-            )
-          ) {
-            document.exitPictureInPicture().catch(() => {});
-          }
+          // WebRTC transport manages its own camera stream; mirror it into our fields
+          this.realtimeTalkCameraStream = stream;
           this.realtimeTalkVideoStream = stream;
         },
       },
-      { ...this.buildRealtimeTalkLaunchOptions(), ...opts },
+      { ...this.buildRealtimeTalkLaunchOptions(), ...opts, captureVideoFrame },
     );
     this.realtimeTalkSession = session;
     try {
@@ -1246,11 +1281,19 @@ export class OpenClawApp extends LitElement {
         this.realtimeTalkSession = null;
       }
       this.realtimeTalkActive = false;
+      this.realtimeTalkMode = null;
       this.realtimeTalkStatus = "error";
       this.realtimeTalkDetail = error instanceof Error ? error.message : String(error);
       this.lastError = this.realtimeTalkDetail;
       this.chatError = this.realtimeTalkDetail;
+      this.stopRealtimeTalkCamera();
     }
+  }
+
+  private stopRealtimeTalkCamera(): void {
+    this.realtimeTalkCameraStream?.getTracks().forEach((t) => t.stop());
+    this.realtimeTalkCameraStream = null;
+    this.realtimeTalkVideoStream = null;
   }
 
   resetRealtimeTalkConversation() {
