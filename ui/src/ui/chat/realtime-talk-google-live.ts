@@ -93,6 +93,10 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
   private closed = false;
   private pendingCalls = new Map<string, PendingFunctionCall>();
   private readonly consultAbortControllers = new Set<AbortController>();
+  // Latency tracking: reset on each tool response, consumed on first output text delta
+  private lastToolResponseSentAt: number | null = null;
+  private lastToolResponseCallId: string | null = null;
+  private turnFirstDeltaEmitted = false;
   private readonly outputQueue = new RealtimeTalkPcmOutputQueue();
   private readonly emitTalkEvent: ReturnType<typeof createRealtimeTalkEventEmitter>;
 
@@ -259,6 +263,14 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
       }
     }
     if (content?.outputTranscription?.text) {
+      if (!this.turnFirstDeltaEmitted && this.lastToolResponseSentAt !== null) {
+        this.turnFirstDeltaEmitted = true;
+        talkTrace(this.ctx.sessionKey, {
+          type: "output.text.first_delta",
+          ttftMs: Date.now() - this.lastToolResponseSentAt,
+          refCallId: this.lastToolResponseCallId,
+        });
+      }
       this.ctx.callbacks.onTranscript?.({
         role: "assistant",
         text: content.outputTranscription.text,
@@ -294,6 +306,16 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
       }
     }
     if (content?.turnComplete) {
+      if (this.lastToolResponseSentAt !== null) {
+        talkTrace(this.ctx.sessionKey, {
+          type: "turn.complete",
+          totalRttMs: Date.now() - this.lastToolResponseSentAt,
+          refCallId: this.lastToolResponseCallId,
+        });
+        this.lastToolResponseSentAt = null;
+        this.lastToolResponseCallId = null;
+      }
+      this.turnFirstDeltaEmitted = false;
       this.emitTalkEvent({ type: "turn.ended", final: true });
     }
     for (const call of message.toolCall?.functionCalls ?? []) {
@@ -455,6 +477,9 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
         ],
       },
     });
+    this.lastToolResponseSentAt = Date.now();
+    this.lastToolResponseCallId = callId;
+    this.turnFirstDeltaEmitted = false;
     talkTrace(this.ctx.sessionKey, { type: "describe_view.response_sent", callId });
   }
 
