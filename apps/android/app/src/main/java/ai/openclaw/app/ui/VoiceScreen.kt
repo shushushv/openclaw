@@ -15,6 +15,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.view.PreviewView
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -41,8 +42,10 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
@@ -50,6 +53,8 @@ import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.PhoneDisabled
 import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.TextFields
@@ -57,6 +62,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -66,6 +72,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -73,6 +80,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 
 /** Voice home screen that routes between talk mode, dictation, and idle setup. */
@@ -98,9 +106,16 @@ fun VoiceScreen(
   val talkModeListening by viewModel.talkModeListening.collectAsState()
   val talkModeSpeaking by viewModel.talkModeSpeaking.collectAsState()
   val talkModeConversation by viewModel.talkModeConversation.collectAsState()
+  val talkModeCameraActive by viewModel.talkModeCameraActive.collectAsState()
+  val talkModeCameraEnabled by viewModel.talkModeCameraEnabled.collectAsState()
 
   var pendingAction by remember { mutableStateOf<VoiceAction?>(null) }
   var hasMicPermission by remember { mutableStateOf(context.hasRecordAudioPermission()) }
+  var hasCameraPermission by remember { mutableStateOf(context.hasCameraPermission()) }
+  // Guard against double-tapping the camera button while the system dialog is open;
+  // ActivityResultLauncher throws IllegalStateException if launched twice concurrently.
+  var cameraPermissionPending by remember { mutableStateOf(false) }
+
   val requestMicPermission =
     rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
       hasMicPermission = granted
@@ -112,6 +127,13 @@ fun VoiceScreen(
         }
       }
       pendingAction = null
+    }
+
+  val requestCameraPermission =
+    rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+      cameraPermissionPending = false
+      hasCameraPermission = granted
+      if (granted) viewModel.toggleTalkCamera()
     }
 
   // Talk mode and dictation use different managers, so choose the transcript
@@ -135,9 +157,23 @@ fun VoiceScreen(
       entries = talkModeConversation,
       listening = talkModeListening,
       speaking = talkModeSpeaking,
+      cameraActive = talkModeCameraActive,
+      cameraEnabled = talkModeCameraEnabled,
       speakerEnabled = speakerEnabled,
       onToggleSpeaker = { viewModel.setSpeakerEnabled(!speakerEnabled) },
       onEndTalk = { viewModel.setTalkModeEnabled(false) },
+      onToggleCamera = {
+        val currentPermission = context.hasCameraPermission()
+        hasCameraPermission = currentPermission
+        if (currentPermission) {
+          viewModel.toggleTalkCamera()
+        } else if (!cameraPermissionPending) {
+          cameraPermissionPending = true
+          requestCameraPermission.launch(Manifest.permission.CAMERA)
+        }
+      },
+      onFlipCamera = { viewModel.flipTalkCamera() },
+      onAttachPreview = { view -> viewModel.attachTalkCameraPreview(view) },
       onOpenVoiceSettings = onOpenVoiceSettings,
     )
     return
@@ -366,9 +402,14 @@ private fun TalkSessionScreen(
   entries: List<VoiceConversationEntry>,
   listening: Boolean,
   speaking: Boolean,
+  cameraActive: Boolean,
+  cameraEnabled: Boolean,
   speakerEnabled: Boolean,
   onToggleSpeaker: () -> Unit,
   onEndTalk: () -> Unit,
+  onToggleCamera: () -> Unit,
+  onFlipCamera: () -> Unit,
+  onAttachPreview: (PreviewView?) -> Unit,
   onOpenVoiceSettings: () -> Unit,
 ) {
   Column(
@@ -397,19 +438,36 @@ private fun TalkSessionScreen(
             style = ClawTheme.type.body,
             color = ClawTheme.colors.textMuted,
           )
+          if (cameraActive) {
+            Icon(
+              imageVector = Icons.Default.Videocam,
+              contentDescription = "Camera active",
+              tint = ClawTheme.colors.success,
+              modifier = Modifier.size(14.dp),
+            )
+          }
         }
       }
       VoicePlainIconButton(icon = Icons.Default.Info, contentDescription = "Talk settings", onClick = onOpenVoiceSettings)
     }
 
-    Surface(
-      modifier = Modifier.fillMaxWidth().height(52.dp),
-      shape = RoundedCornerShape(ClawTheme.radii.panel),
-      color = ClawTheme.colors.canvas,
-      border = BorderStroke(1.dp, ClawTheme.colors.borderStrong),
-    ) {
-      Box(contentAlignment = Alignment.Center) {
-        TalkWaveform(active = listening || speaking)
+    if (cameraEnabled) {
+      CameraHeroCard(
+        onEndTalk = onEndTalk,
+        onToggleCamera = onToggleCamera,
+        onFlipCamera = onFlipCamera,
+        onAttachPreview = onAttachPreview,
+      )
+    } else {
+      Surface(
+        modifier = Modifier.fillMaxWidth().height(52.dp),
+        shape = RoundedCornerShape(ClawTheme.radii.panel),
+        color = ClawTheme.colors.canvas,
+        border = BorderStroke(1.dp, ClawTheme.colors.borderStrong),
+      ) {
+        Box(contentAlignment = Alignment.Center) {
+          TalkWaveform(active = listening || speaking)
+        }
       }
     }
 
@@ -424,6 +482,11 @@ private fun TalkSessionScreen(
       verticalAlignment = Alignment.CenterVertically,
     ) {
       TalkControl(icon = if (speakerEnabled) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff, label = if (speakerEnabled) "Mute" else "Unmute", onClick = onToggleSpeaker)
+      TalkControl(
+        icon = if (cameraEnabled) Icons.Default.Videocam else Icons.Default.VideocamOff,
+        label = if (cameraEnabled) "Cam On" else "Cam Off",
+        onClick = onToggleCamera,
+      )
       TalkControl(icon = Icons.Default.PhoneDisabled, label = "End", primary = true, onClick = onEndTalk)
       TalkControl(icon = Icons.Default.GraphicEq, label = "Voice", onClick = onOpenVoiceSettings)
     }
@@ -996,3 +1059,124 @@ private fun String.isVoiceGatewayReady(): Boolean {
 private fun String.voiceGatewayLabel(): String = if (isVoiceGatewayReady()) "Connected and ready" else "Gateway not connected"
 
 private fun Context.hasRecordAudioPermission(): Boolean = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+private fun Context.hasCameraPermission(): Boolean = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+
+/**
+ * Full-bleed camera preview card that mirrors the iOS Camera Hero mode.
+ *
+ * The [PreviewView] is created here and handed to [onAttachPreview] so that
+ * [VoiceCameraCaptureManager] can bind both [Preview] and [ImageCapture] in one
+ * [ProcessCameraProvider.bindToLifecycle] call — CameraX requires all use cases for the
+ * same camera to be bound together.  The manager also calls [startPreview] eagerly so the
+ * feed appears without waiting for the first capture.
+ */
+@Composable
+private fun CameraHeroCard(
+  onEndTalk: () -> Unit,
+  onToggleCamera: () -> Unit,
+  onFlipCamera: () -> Unit,
+  onAttachPreview: (PreviewView?) -> Unit,
+) {
+  DisposableEffect(Unit) {
+    onDispose { onAttachPreview(null) }
+  }
+
+  Box(
+    modifier =
+      Modifier
+        .fillMaxWidth()
+        .aspectRatio(3f / 4f)
+        .clip(RoundedCornerShape(ClawTheme.radii.panel)),
+  ) {
+    // Camera preview layer — binding is handled by VoiceCameraCaptureManager
+    AndroidView(
+      factory = { ctx ->
+        PreviewView(ctx).also { view -> onAttachPreview(view) }
+      },
+      modifier = Modifier.fillMaxSize(),
+    )
+
+    // Gradient overlay so controls are readable over any background
+    Box(
+      modifier =
+        Modifier.fillMaxSize().background(
+          Brush.verticalGradient(
+            0.35f to Color.Transparent,
+            1.0f to Color.Black.copy(alpha = 0.60f),
+          ),
+        ),
+    )
+
+    // Floating control bar at bottom
+    Row(
+      modifier =
+        Modifier
+          .align(Alignment.BottomCenter)
+          .fillMaxWidth()
+          .padding(horizontal = 8.dp, vertical = 14.dp),
+      horizontalArrangement = Arrangement.SpaceEvenly,
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      // Mic (placeholder — mic mute is not yet wired up on Android)
+      CameraOverlayButton(icon = Icons.Default.Mic, label = "Mic", onClick = {}, enabled = false)
+
+      // Camera toggle (tap to close preview)
+      CameraOverlayButton(icon = Icons.Default.VideocamOff, label = "Camera", onClick = onToggleCamera)
+
+      // Central red stop button (68 dp)
+      Surface(
+        onClick = onEndTalk,
+        shape = CircleShape,
+        color = Color(0xFFE5193C),
+        modifier = Modifier.size(68.dp),
+      ) {
+        Box(contentAlignment = Alignment.Center) {
+          Icon(
+            imageVector = Icons.Default.PhoneDisabled,
+            contentDescription = "End talk",
+            tint = Color.White,
+            modifier = Modifier.size(24.dp),
+          )
+        }
+      }
+
+      // Flip camera
+      CameraOverlayButton(icon = Icons.Default.FlipCameraAndroid, label = "Flip", onClick = onFlipCamera)
+
+      // Share (disabled)
+      CameraOverlayButton(icon = Icons.Default.Cast, label = "Share", onClick = {}, enabled = false)
+    }
+  }
+}
+
+@Composable
+private fun CameraOverlayButton(
+  icon: androidx.compose.ui.graphics.vector.ImageVector,
+  label: String,
+  onClick: () -> Unit,
+  enabled: Boolean = true,
+) {
+  Column(
+    horizontalAlignment = Alignment.CenterHorizontally,
+    verticalArrangement = Arrangement.spacedBy(4.dp),
+  ) {
+    Surface(
+      onClick = onClick,
+      enabled = enabled,
+      modifier = Modifier.size(44.dp),
+      shape = CircleShape,
+      color = Color.White.copy(alpha = if (enabled) 0.22f else 0.10f),
+      contentColor = Color.White.copy(alpha = if (enabled) 1f else 0.4f),
+    ) {
+      Box(contentAlignment = Alignment.Center) {
+        Icon(imageVector = icon, contentDescription = label, modifier = Modifier.size(18.dp))
+      }
+    }
+    Text(
+      text = label,
+      style = ClawTheme.type.caption.copy(fontSize = 11.sp, lineHeight = 14.sp),
+      color = Color.White.copy(alpha = if (enabled) 0.85f else 0.4f),
+    )
+  }
+}

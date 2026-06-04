@@ -55,6 +55,7 @@ import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.LifecycleOwner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -655,6 +656,32 @@ class NodeRuntime(
 
   val talkModeConversation: StateFlow<List<VoiceConversationEntry>>
     get() = talkMode.conversation
+
+  val talkModeCameraActive: StateFlow<Boolean>
+    get() = talkMode.isCameraActive
+
+  val talkModeCameraEnabled: StateFlow<Boolean>
+    get() = talkMode.isCameraEnabled
+
+  val talkModeCameraFacingFront: StateFlow<Boolean>
+    get() = talkMode.isCameraFacingFront
+
+  /** Forwards the foreground activity lifecycle to the talk-mode camera capturer. */
+  fun attachTalkModeCameraLifecycle(owner: LifecycleOwner) {
+    talkMode.attachCameraLifecycleOwner(owner)
+  }
+
+  fun toggleTalkModeCamera() {
+    talkMode.toggleCameraEnabled()
+  }
+
+  fun flipTalkModeCamera() {
+    talkMode.flipCamera()
+  }
+
+  fun attachTalkModeCameraPreview(view: androidx.camera.view.PreviewView?) {
+    talkMode.attachCameraPreviewView(view)
+  }
 
   private fun syncMainSessionKey(agentId: String?) {
     val resolvedKey = resolveNodeMainSessionKey(agentId)

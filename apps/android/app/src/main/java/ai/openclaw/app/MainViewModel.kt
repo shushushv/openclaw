@@ -166,6 +166,9 @@ class MainViewModel(
   val talkModeStatusText: StateFlow<String> = runtimeState(initial = "Off") { it.talkModeStatusText }
   val talkModeConversation: StateFlow<List<VoiceConversationEntry>> =
     runtimeState(initial = emptyList()) { it.talkModeConversation }
+  val talkModeCameraActive: StateFlow<Boolean> = runtimeState(initial = false) { it.talkModeCameraActive }
+  val talkModeCameraEnabled: StateFlow<Boolean> = runtimeState(initial = false) { it.talkModeCameraEnabled }
+  val talkModeCameraFacingFront: StateFlow<Boolean> = runtimeState(initial = true) { it.talkModeCameraFacingFront }
 
   val chatSessionKey: StateFlow<String> = runtimeState(initial = "main") { it.chatSessionKey }
   val chatSessionId: StateFlow<String?> = runtimeState(initial = null) { it.chatSessionId }
@@ -205,6 +208,7 @@ class MainViewModel(
     runtime.camera.attachLifecycleOwner(owner)
     runtime.camera.attachPermissionRequester(permissionRequester)
     runtime.sms.attachPermissionRequester(permissionRequester)
+    runtime.attachTalkModeCameraLifecycle(owner)
   }
 
   /**
@@ -372,6 +376,18 @@ class MainViewModel(
 
   fun setTalkModeEnabled(enabled: Boolean) {
     ensureRuntime().setTalkModeEnabled(enabled)
+  }
+
+  fun toggleTalkCamera() {
+    ensureRuntime().toggleTalkModeCamera()
+  }
+
+  fun flipTalkCamera() {
+    ensureRuntime().flipTalkModeCamera()
+  }
+
+  fun attachTalkCameraPreview(view: androidx.camera.view.PreviewView?) {
+    ensureRuntime().attachTalkModeCameraPreview(view)
   }
 
   fun setSpeakerEnabled(enabled: Boolean) {

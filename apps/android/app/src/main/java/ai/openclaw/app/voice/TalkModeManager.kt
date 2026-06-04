@@ -24,7 +24,10 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Base64
 import android.util.Log
+import androidx.camera.core.CameraSelector
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.LifecycleOwner
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -50,6 +53,7 @@ import kotlinx.serialization.json.buildJsonObject
 import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
 
@@ -87,6 +91,7 @@ internal data class RealtimeToolRun(
 
 private const val REALTIME_AGENT_CONSULT_TOOL = "openclaw_agent_consult"
 private const val REALTIME_AGENT_CONTROL_TOOL = "openclaw_agent_control"
+private const val REALTIME_DESCRIBE_VIEW_TOOL = "describe_view"
 
 private data class RealtimeToolCompletion(
   val state: String,
@@ -103,6 +108,7 @@ class TalkModeManager internal constructor(
   private val onStoppedByRelay: () -> Unit = {},
   private val talkSpeakClient: TalkSpeechSynthesizing = TalkSpeakClient(session = session),
   private val talkAudioPlayer: TalkAudioPlaying = TalkAudioPlayer(context),
+  private val voiceCamera: VoiceCameraCaptureManager = VoiceCameraCaptureManager(context),
 ) {
   companion object {
     private const val tag = "TalkMode"
@@ -166,8 +172,24 @@ class TalkModeManager internal constructor(
   private val startGeneration = AtomicLong(0L)
 
   @Volatile private var realtimeSessionId: String? = null
+  // Provider string from talk.session.create; used to pick video frame delivery path.
+  // Null means no session active; blank/unknown defaults to OpenAI path.
+  @Volatile private var realtimeSessionProvider: String? = null
   private var realtimeCaptureJob: Job? = null
   private var realtimeAppendJob: Job? = null
+  private var realtimeVideoStreamingJob: Job? = null
+
+  private val _isCameraActive = MutableStateFlow(false)
+  /** True while the camera is actively streaming frames for the current relay session. */
+  val isCameraActive: StateFlow<Boolean> = _isCameraActive
+
+  private val _isCameraEnabled = MutableStateFlow(false)
+  /** True when the user has turned the camera on via the UI toggle. */
+  val isCameraEnabled: StateFlow<Boolean> = _isCameraEnabled
+
+  private val _isCameraFacingFront = MutableStateFlow(true)
+  /** True when the front camera is selected, false for rear camera. */
+  val isCameraFacingFront: StateFlow<Boolean> = _isCameraFacingFront
   // Realtime tool calls can complete before their chat final arrives; cache by call/run id until both sides meet.
   private val realtimeToolRuns = LinkedHashMap<String, RealtimeToolRun>()
   private val pendingRealtimeToolCalls = LinkedHashSet<String>()
@@ -218,6 +240,44 @@ class TalkModeManager internal constructor(
         else -> { /* regained or duck — ignore */ }
       }
     }
+
+  /**
+   * Attaches the foreground lifecycle owner so the camera can bind use cases.
+   * Call this from the Activity / Fragment before starting a talk session with video.
+   */
+  fun attachCameraLifecycleOwner(owner: LifecycleOwner) {
+    voiceCamera.attachLifecycleOwner(owner)
+  }
+
+  /**
+   * Attaches (or detaches) a [PreviewView] so the camera feed is rendered in the Camera Hero card.
+   * Passing null detaches the view and releases the camera binding.  Passing a non-null view
+   * eagerly starts the preview so the feed appears without waiting for the first capture.
+   */
+  fun attachCameraPreviewView(view: androidx.camera.view.PreviewView?) {
+    voiceCamera.attachPreviewView(view)
+    if (view != null) voiceCamera.startPreview(scope)
+    else voiceCamera.releaseCamera()
+  }
+
+  /** Toggles the user-facing camera on/off. When disabled, stops active streaming. */
+  fun toggleCameraEnabled() {
+    val next = !_isCameraEnabled.value
+    _isCameraEnabled.value = next
+    if (!next) {
+      stopVideoStreaming()
+      voiceCamera.releaseCamera()
+    }
+  }
+
+  /** Switches between front and rear cameras. */
+  fun flipCamera() {
+    val front = !_isCameraFacingFront.value
+    _isCameraFacingFront.value = front
+    voiceCamera.setFacing(
+      if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA,
+    )
+  }
 
   /** Updates the chat session used for TalkMode turns and wake-command replies. */
   fun setMainSessionKey(sessionKey: String?) {
@@ -654,11 +714,12 @@ class TalkModeManager internal constructor(
     }
 
     realtimeSessionId = sessionId
+    realtimeSessionProvider = root?.get("provider").asStringOrNull()
     realtimeOutputSuppressed = false
     _isListening.value = true
     _statusText.value = "Listening"
     startRealtimeCapture(sessionId)
-    Log.d(tag, "realtime session started relaySessionId=$sessionId")
+    Log.d(tag, "realtime session started relaySessionId=$sessionId provider=${realtimeSessionProvider ?: "unknown"}")
   }
 
   private fun disableRealtimeModeAndNotifyOwner() {
@@ -1018,6 +1079,7 @@ class TalkModeManager internal constructor(
     val status = _statusText.value
     val sessionId = realtimeSessionId
     realtimeSessionId = null
+    realtimeSessionProvider = null
     realtimeOutputSuppressed = false
     if (cancelCapture) {
       realtimeCaptureJob?.cancel()
@@ -1027,6 +1089,7 @@ class TalkModeManager internal constructor(
     }
     realtimeCaptureJob = null
     realtimeAppendJob = null
+    stopVideoStreaming()
     realtimeToolRuns.clear()
     pendingRealtimeToolCalls.clear()
     pendingRealtimeToolCompletions.clear()
@@ -1069,6 +1132,10 @@ class TalkModeManager internal constructor(
       try {
         if (name == REALTIME_AGENT_CONTROL_TOOL) {
           submitRealtimeAgentControl(callId = callId, relaySessionId = relaySessionId, args = args)
+          return@launch
+        }
+        if (name == REALTIME_DESCRIBE_VIEW_TOOL) {
+          handleDescribeViewToolCall(callId = callId, relaySessionId = relaySessionId)
           return@launch
         }
         if (forced) {
@@ -1175,6 +1242,8 @@ class TalkModeManager internal constructor(
     result: JsonObject,
     sessionId: String? = realtimeSessionId,
     options: JsonObject? = null,
+    // data to mimeType; used by Gemini passive path to embed the frame in the tool result.
+    imageFrame: Pair<String, String>? = null,
   ) {
     val activeSessionId = sessionId ?: return
     val params =
@@ -1183,6 +1252,15 @@ class TalkModeManager internal constructor(
         put("callId", JsonPrimitive(callId))
         put("result", result)
         if (options != null) put("options", options)
+        if (imageFrame != null) {
+          put(
+            "imageFrame",
+            buildJsonObject {
+              put("data", JsonPrimitive(imageFrame.first))
+              put("mimeType", JsonPrimitive(imageFrame.second))
+            },
+          )
+        }
       }
     try {
       session.request("talk.session.submitToolResult", params.toString(), timeoutMs = 15_000)
@@ -1245,6 +1323,124 @@ class TalkModeManager internal constructor(
     } else {
       submitRealtimeToolError(callId, "control call returned no result", relaySessionId)
     }
+  }
+
+  /**
+   * Handles a `describe_view` tool call.
+   *
+   * - OpenAI path (default): capture one frame → appendVideo → submit empty tool result.
+   * - Gemini path: capture one frame → submit tool result with imageFrame embedded.
+   *
+   * Either path is skipped gracefully if the camera is unavailable.
+   */
+  private suspend fun handleDescribeViewToolCall(
+    callId: String,
+    relaySessionId: String,
+  ) {
+    // Snapshot provider before captureFrame() — the session can be torn down or replaced
+    // during the up-to-5s capture window, and we must route with the original session's provider.
+    val isGemini = realtimeSessionProvider?.takeIf { it.isNotEmpty() }?.lowercase()?.let { p ->
+      p == "gemini" || p == "google" || p.startsWith("gemini/")
+    } == true
+    val base64 = voiceCamera.captureFrame()
+    if (base64 == null) {
+      Log.w(tag, "describe_view: captureFrame returned null — submitting empty result")
+      submitRealtimeToolResult(
+        callId = callId,
+        result = buildJsonObject { put("text", JsonPrimitive("")) },
+        sessionId = relaySessionId,
+      )
+      return
+    }
+    if (isGemini) {
+      // Gemini passive: embed the frame directly in the tool result.
+      submitRealtimeToolResult(
+        callId = callId,
+        result = buildJsonObject { put("text", JsonPrimitive("")) },
+        sessionId = relaySessionId,
+        imageFrame = Pair(base64, "image/jpeg"),
+      )
+    } else {
+      // OpenAI passive: send the frame via appendVideo first, then submit result.
+      appendVideo(sessionId = relaySessionId, base64 = base64)
+      submitRealtimeToolResult(
+        callId = callId,
+        result = buildJsonObject { put("text", JsonPrimitive("")) },
+        sessionId = relaySessionId,
+      )
+    }
+  }
+
+  private suspend fun appendVideo(
+    sessionId: String,
+    base64: String,
+  ) {
+    val params =
+      buildJsonObject {
+        put("sessionId", JsonPrimitive(sessionId))
+        put(
+          "frame",
+          buildJsonObject {
+            put("data", JsonPrimitive(base64))
+            put("mimeType", JsonPrimitive("image/jpeg"))
+          },
+        )
+      }
+    try {
+      session.request("talk.session.appendVideo", params.toString(), timeoutMs = 10_000)
+    } catch (err: Throwable) {
+      if (err is CancellationException) throw err
+      Log.w(tag, "appendVideo failed: ${err.message ?: err::class.simpleName}")
+    }
+  }
+
+  /**
+   * Starts continuous active video streaming at [fps] frames per second.
+   * Each frame is sent via appendVideo; in-flight frames are dropped (not queued).
+   */
+  fun startVideoStreaming(
+    fps: Double = 1.0,
+  ) {
+    val sessionId = realtimeSessionId ?: return
+    val inFlight = AtomicBoolean(false)
+
+    _isCameraActive.value = true
+    realtimeVideoStreamingJob?.cancel()
+    realtimeVideoStreamingJob =
+      scope.launch {
+        // Capture job identity so the finally block can tell whether a newer
+        // startVideoStreaming() call has already taken over before it runs.
+        val thisJob = coroutineContext[Job]
+        try {
+          val streamingScope = this
+          voiceCamera.startStreaming(scope = streamingScope, fps = fps) { base64 ->
+            val activeSessionId = realtimeSessionId ?: return@startStreaming
+            if (!inFlight.compareAndSet(false, true)) return@startStreaming
+            streamingScope.launch {
+              try {
+                appendVideo(sessionId = activeSessionId, base64 = base64)
+              } finally {
+                inFlight.set(false)
+              }
+            }
+          }
+          // Keep the coroutine alive so _isCameraActive stays true until cancellation.
+          awaitCancellation()
+        } finally {
+          voiceCamera.stopStreaming()
+          // Only clear _isCameraActive when we are still the active streaming job.
+          // If startVideoStreaming() launched a newer job, that job owns the flag.
+          if (realtimeVideoStreamingJob === thisJob) _isCameraActive.value = false
+        }
+      }
+    Log.d(tag, "video streaming started sessionId=$sessionId fps=$fps")
+  }
+
+  private fun stopVideoStreaming() {
+    realtimeVideoStreamingJob?.cancel()
+    realtimeVideoStreamingJob = null
+    voiceCamera.stopStreaming()
+    _isCameraActive.value = false
   }
 
   private fun upsertRealtimeConversation(
@@ -1793,7 +1989,8 @@ class TalkModeManager internal constructor(
     sinceSeconds: Double? = null,
   ): String? {
     val key = mainSessionKey.ifBlank { "main" }
-    val res = session.request("chat.history", "{\"sessionKey\":\"$key\"}")
+    val historyParams = buildJsonObject { put("sessionKey", JsonPrimitive(key)) }
+    val res = session.request("chat.history", historyParams.toString())
     val root = json.parseToJsonElement(res).asObjectOrNull() ?: return null
     val messages = root["messages"] as? JsonArray ?: return null
     for (item in messages.reversed()) {
