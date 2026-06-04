@@ -20,6 +20,7 @@ final class TalkRealtimeWebRTCSession: NSObject {
     private static let logger = Logger(subsystem: "ai.openclaw", category: "TalkRealtimeWebRTC")
     private static let consultToolName = "openclaw_agent_consult"
     private static let controlToolName = "openclaw_agent_control"
+    private static let describeViewToolName = "describe_view"
     private static let defaultOfferURL = "https://api.openai.com/v1/realtime/calls"
     private static let mediaStreamID = "openclaw-ios-realtime"
     private static let audioTrackID = "openclaw-ios-audio"
@@ -36,6 +37,9 @@ final class TalkRealtimeWebRTCSession: NSObject {
     private let sessionKey: String
     private weak var delegate: TalkRealtimeWebRTCSessionDelegate?
 
+    /// Injected by the caller to enable camera frame capture for describe_view tool calls.
+    var cameraController: CameraController?
+
     private var factory: RTCPeerConnectionFactory?
     private var peerConnection: RTCPeerConnection?
     private var dataChannel: RTCDataChannel?
@@ -50,6 +54,8 @@ final class TalkRealtimeWebRTCSession: NSObject {
     private var loggedFirstAssistantSignal = false
     private var assistantAudioActive = false
     private var assistantAudioFinishTask: Task<Void, Never>?
+    private var activeVideoEnabled = false
+    private var activeStreamingGeneration: Int = 0
 
     private struct ToolBuffer {
         var name: String
@@ -165,6 +171,7 @@ final class TalkRealtimeWebRTCSession: NSObject {
     func stop() {
         let shouldNotify = !self.stopped
         self.stopped = true
+        self.stopActiveStreaming()
         self.cancelActiveToolCalls()
         self.toolBuffers.removeAll()
         self.dataChannel?.close()
@@ -480,13 +487,20 @@ final class TalkRealtimeWebRTCSession: NSObject {
         self.assistantAudioActive = false
         self.assistantAudioFinishTask?.cancel()
         self.assistantAudioFinishTask = nil
-        self.delegate?.realtimeSession(
-            self,
-            didChangeStatus: name == Self.controlToolName ? "Updating OpenClaw" : "Asking OpenClaw")
+        let toolStatus: String = if name == Self.controlToolName {
+            "Updating OpenClaw"
+        } else if name == Self.describeViewToolName {
+            TalkModeManager.cameraLookingStatus
+        } else {
+            "Asking OpenClaw"
+        }
+        self.delegate?.realtimeSession(self, didChangeStatus: toolStatus)
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             if name == Self.controlToolName {
                 await self.submitControlToolCall(callId: callId, argsJSON: args ?? "{}")
+            } else if name == Self.describeViewToolName {
+                await self.submitDescribeViewToolCall(callId: callId)
             } else {
                 await self.submitConsultToolCall(callId: callId, argsJSON: args ?? "{}")
             }
@@ -495,7 +509,7 @@ final class TalkRealtimeWebRTCSession: NSObject {
     }
 
     private static func isSupportedToolName(_ name: String?) -> Bool {
-        name == self.consultToolName || name == self.controlToolName
+        name == self.consultToolName || name == self.controlToolName || name == self.describeViewToolName
     }
 
     private func submitConsultToolCall(callId: String, argsJSON: String) async {
@@ -576,6 +590,82 @@ final class TalkRealtimeWebRTCSession: NSObject {
         if !self.assistantAudioActive {
             self.delegate?.realtimeSession(self, didChangeStatus: "Listening")
         }
+    }
+
+    private func submitDescribeViewToolCall(callId: String) async {
+        defer {
+            self.activeToolTasks[callId] = nil
+            if !self.assistantAudioActive, !self.stopped {
+                self.delegate?.realtimeSession(self, didChangeStatus: "Listening")
+            }
+        }
+        let base64 = await cameraController?.snapForTalk(maxWidth: 480)
+        guard !self.stopped else { return }
+        if let base64, !base64.isEmpty {
+            // OpenAI WebRTC tool results are text-only; inject the frame as a separate
+            // input_image conversation item before the function_call_output.
+            self.sendRealtimeEvent([
+                "type": "conversation.item.create",
+                "item": [
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        [
+                            "type": "input_image",
+                            "image_url": "data:image/jpeg;base64,\(base64)",
+                        ],
+                    ],
+                ],
+            ])
+        }
+        let outputText = base64?.isEmpty == false
+            ? "Here is the current camera view."
+            : "Camera unavailable — no image captured."
+        self.submitToolResult(callId: callId, result: ["result": outputText])
+    }
+
+    // MARK: - Active video streaming
+
+    func startActiveStreaming() {
+        guard let cc = cameraController else { return }
+        self.activeVideoEnabled = true
+        // Increment before Task creation so concurrent calls each get a unique generation.
+        // The Task checks generation after stopStreaming to ensure only the latest call starts.
+        self.activeStreamingGeneration &+= 1
+        let gen = self.activeStreamingGeneration
+        Task { [weak self, cc] in
+            await cc.stopStreaming()
+            guard let self, self.activeVideoEnabled, self.activeStreamingGeneration == gen else { return }
+            await cc.startStreaming(fps: 1.0) { @Sendable [weak self] base64 in
+                guard let self else { return }
+                await self.handleActiveVideoFrame(base64: base64)
+            }
+        }
+    }
+
+    func stopActiveStreaming() {
+        guard self.activeVideoEnabled else { return }
+        self.activeVideoEnabled = false
+        self.activeStreamingGeneration &+= 1 // invalidate any pending startActiveStreaming Task
+        guard let cc = cameraController else { return }
+        Task { await cc.stopStreaming() }
+    }
+
+    private func handleActiveVideoFrame(base64: String) async {
+        guard !self.stopped else { return }
+        // Inject frame as input_image conversation item — active push does not trigger response.create.
+        // DataChannel sends data:image/jpeg;base64,... prefix (unlike relay which uses raw base64).
+        self.sendRealtimeEvent([
+            "type": "conversation.item.create",
+            "item": [
+                "type": "message",
+                "role": "user",
+                "content": [[
+                    "type": "input_image",
+                    "image_url": "data:image/jpeg;base64,\(base64)",
+                ]],
+            ],
+        ])
     }
 
     private func submitControlToolCall(callId: String, argsJSON: String) async {

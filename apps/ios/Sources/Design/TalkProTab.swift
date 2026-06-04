@@ -82,7 +82,13 @@ struct TalkProTab: View {
     }
 
     private var statusChip: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
+            if self.appModel.talkMode.isCameraActive {
+                Image(systemName: "camera.fill")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(Color.orange)
+                    .accessibilityLabel("Camera active")
+            }
             Circle()
                 .fill(self.state.color)
                 .frame(width: 7, height: 7)
@@ -103,6 +109,17 @@ struct TalkProTab: View {
     }
 
     private var voiceHeroCard: some View {
+        Group {
+            if self.state.primaryAction == .stop, self.appModel.talkMode.isCameraEnabled {
+                self.cameraHeroCard
+            } else {
+                self.orbHeroCard
+            }
+        }
+        .padding(.horizontal, OpenClawProMetric.pagePadding)
+    }
+
+    private var orbHeroCard: some View {
         CommandPanel(tint: self.state.color, isProminent: true, padding: 16) {
             VStack(alignment: .center, spacing: 16) {
                 TalkProOrb(
@@ -122,23 +139,120 @@ struct TalkProTab: View {
                         .multilineTextAlignment(.center)
                 }
 
-                Button(action: self.handlePrimaryAction) {
-                    Label(self.state.primaryButtonTitle, systemImage: self.state.primaryButtonIcon)
-                        .font(.subheadline.weight(.bold))
-                        .foregroundStyle(.white)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 50)
-                        .background {
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .fill(self.state.primaryButtonFill)
-                                .shadow(color: self.state.color.opacity(0.28), radius: 18, y: 8)
-                        }
+                if self.state.primaryAction == .stop {
+                    self.talkControlBar(isOverlay: false)
+                } else {
+                    Button(action: self.handlePrimaryAction) {
+                        Label(self.state.primaryButtonTitle, systemImage: self.state.primaryButtonIcon)
+                            .font(.subheadline.weight(.bold))
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 50)
+                            .background {
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(self.state.primaryButtonFill)
+                                    .shadow(color: self.state.color.opacity(0.28), radius: 18, y: 8)
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(self.state.primaryAction == .waiting)
                 }
-                .buttonStyle(.plain)
-                .disabled(self.state.primaryAction == .waiting)
             }
         }
-        .padding(.horizontal, OpenClawProMetric.pagePadding)
+    }
+
+    private var cameraHeroCard: some View {
+        ZStack(alignment: .bottom) {
+            Group {
+                if let session = self.appModel.talkMode.cameraSharedSession {
+                    CameraPreviewView(session: session)
+                } else {
+                    Color.black
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: 370)
+            .clipShape(RoundedRectangle(cornerRadius: OpenClawProMetric.cardRadius, style: .continuous))
+
+            // Gradient so controls are readable over any background.
+            LinearGradient(
+                colors: [Color.clear, Color.black.opacity(0.55)],
+                startPoint: .center,
+                endPoint: .bottom)
+                .clipShape(RoundedRectangle(cornerRadius: OpenClawProMetric.cardRadius, style: .continuous))
+
+            self.talkControlBar(isOverlay: true)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 16)
+        }
+        .background(
+            RoundedRectangle(cornerRadius: OpenClawProMetric.cardRadius, style: .continuous)
+                .fill(Color.black))
+    }
+
+    private func talkControlBar(isOverlay: Bool) -> some View {
+        let talkMode = self.appModel.talkMode
+        let cameraActive = isOverlay || talkMode.isCameraEnabled
+        return HStack(spacing: 0) {
+            TalkControlButton(
+                icon: talkMode.isMicMuted ? "mic.slash.fill" : "mic.fill",
+                label: talkMode.isMicMuted ? "已静音" : "麦克风",
+                isActive: !talkMode.isMicMuted,
+                isOverlay: isOverlay,
+                action: { talkMode.toggleMicMute() })
+
+            TalkControlButton(
+                icon: cameraActive ? "camera.fill" : "camera.slash.fill",
+                label: cameraActive ? "摄像头" : "已关闭",
+                isActive: cameraActive,
+                isOverlay: isOverlay,
+                action: { talkMode.toggleCameraEnabled() })
+
+            if isOverlay {
+                Button(action: self.handlePrimaryAction) {
+                    ZStack {
+                        Circle()
+                            .fill(OpenClawBrand.danger)
+                            .frame(width: 68, height: 68)
+                            .shadow(color: OpenClawBrand.danger.opacity(0.4), radius: 14, y: 6)
+                        TalkProWaveform(
+                            mode: self.state.waveformMode(micLevel: talkMode.micLevel),
+                            tint: .white,
+                            barCount: 12)
+                            .frame(width: 40, height: 26)
+                            .clipped()
+                    }
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
+            } else {
+                Button(action: self.handlePrimaryAction) {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 60, height: 60)
+                        .background(Circle().fill(OpenClawBrand.danger))
+                        .shadow(color: OpenClawBrand.danger.opacity(0.35), radius: 12, y: 6)
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
+            }
+
+            TalkControlButton(
+                icon: "camera.rotate.fill",
+                label: "翻转",
+                isActive: cameraActive,
+                isOverlay: isOverlay,
+                action: cameraActive ? { talkMode.flipCamera() } : nil)
+
+            TalkControlButton(
+                icon: "airplayvideo",
+                label: "共享",
+                isActive: false,
+                isOverlay: isOverlay,
+                action: nil)
+        }
+        .padding(.top, isOverlay ? 0 : 4)
     }
 
     private var conversationCard: some View {
@@ -648,5 +762,41 @@ private struct TalkProWaveform: View {
         case .still:
             return index == self.barCount / 2 ? 0.32 : 0.16
         }
+    }
+}
+
+private struct TalkControlButton: View {
+    let icon: String
+    let label: String
+    let isActive: Bool
+    var isOverlay: Bool = false
+    let action: (() -> Void)?
+
+    var body: some View {
+        Button {
+            self.action?()
+        } label: {
+            VStack(spacing: 6) {
+                Image(systemName: self.icon)
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(
+                        self.isOverlay
+                            ? (self.isActive ? Color.white : Color.white.opacity(0.55))
+                            : (self.isActive ? Color.primary : Color(.systemGray2)))
+                    .frame(width: 52, height: 52)
+                    .background(
+                        Circle().fill(
+                            self.isOverlay
+                                ? Color.white.opacity(0.22)
+                                : Color(.systemGray5)))
+                Text(self.label)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(self.isOverlay ? Color.white.opacity(0.80) : Color.secondary)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(self.action == nil)
+        .opacity(self.action == nil ? 0.45 : 1)
+        .frame(maxWidth: .infinity)
     }
 }

@@ -85,6 +85,7 @@ private actor RealtimeAudioSender {
 @MainActor
 final class RealtimeTalkRelaySession {
     private static let agentControlToolName = "openclaw_agent_control"
+    private static let describeViewToolName = "describe_view"
 
     struct Options {
         let sessionKey: String
@@ -92,6 +93,9 @@ final class RealtimeTalkRelaySession {
         let model: String?
         let voice: String?
     }
+
+    /// Injected by the caller to enable camera frame capture for describe_view tool calls.
+    var cameraController: CameraController?
 
     private struct ToolCallStartResponse: Decodable {
         let runId: String?
@@ -131,6 +135,8 @@ final class RealtimeTalkRelaySession {
     private var pendingOutputDone = false
     private var audioSender: RealtimeAudioSender?
     private var isClosed = false
+    private var activeVideoEnabled = false
+    private var activeStreamingGeneration: Int = 0
     private var isOutputPlaying = false
     private var outputStartedAtMs: Double?
     private var outputPlaybackExpectedEndMs: Double = 0
@@ -196,6 +202,7 @@ final class RealtimeTalkRelaySession {
     private func close(sendClose: Bool) {
         guard !self.isClosed else { return }
         self.isClosed = true
+        self.stopActiveStreaming()
         self.stopMicrophonePump()
         self.eventTask?.cancel()
         self.eventTask = nil
@@ -403,6 +410,10 @@ final class RealtimeTalkRelaySession {
                     args: payload["args"])
                 return
             }
+            if name == Self.describeViewToolName {
+                await self.handleDescribeViewToolCall(callId: callId)
+                return
+            }
             let completionStream = await self.gateway.subscribeServerEvents(bufferingNewest: 200)
             let args = payload["args"]?.foundationValue ?? [:]
             let startPayload: [String: Any] = [
@@ -467,18 +478,123 @@ final class RealtimeTalkRelaySession {
         self.onStatus("Listening (Realtime)")
     }
 
-    private func submitToolResult(callId: String, result: [String: Any]) async throws {
+    private func submitToolResult(
+        callId: String,
+        result: [String: Any],
+        imageFrame: (data: String, mimeType: String)? = nil) async throws
+    {
         guard let relaySessionId else { return }
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "sessionId": relaySessionId,
             "callId": callId,
             "result": result,
         ]
+        if let imageFrame {
+            payload["imageFrame"] = ["data": imageFrame.data, "mimeType": imageFrame.mimeType]
+        }
         _ = try await self.requestJSON(
             method: "talk.session.submitToolResult",
             payload: payload,
             decodeAs: TalkSessionOkResult.self,
             timeoutSeconds: 30)
+    }
+
+    private func appendVideo(base64: String) async throws {
+        guard let relaySessionId else { return }
+        let payload: [String: Any] = [
+            "sessionId": relaySessionId,
+            "frame": ["data": base64, "mimeType": "image/jpeg"],
+        ]
+        _ = try await self.requestJSON(
+            method: "talk.session.appendVideo",
+            payload: payload,
+            decodeAs: TalkSessionOkResult.self,
+            timeoutSeconds: 10)
+    }
+
+    // MARK: - Active video streaming
+
+    func startActiveStreaming() {
+        guard let cc = cameraController else { return }
+        self.activeVideoEnabled = true
+        self.activeStreamingGeneration &+= 1
+        let gen = self.activeStreamingGeneration
+        Task { [weak self, cc] in
+            await cc.stopStreaming()
+            guard let self, self.activeVideoEnabled, self.activeStreamingGeneration == gen else { return }
+            await cc.startStreaming(fps: 1.0) { @Sendable [weak self] base64 in
+                guard let self else { return }
+                await self.handleActiveVideoFrame(base64: base64)
+            }
+        }
+    }
+
+    func stopActiveStreaming() {
+        guard self.activeVideoEnabled else { return }
+        self.activeVideoEnabled = false
+        self.activeStreamingGeneration &+= 1
+        guard let cc = cameraController else { return }
+        Task { await cc.stopStreaming() }
+    }
+
+    private func handleActiveVideoFrame(base64: String) async {
+        guard !self.isClosed else { return }
+        do {
+            try await self.appendVideo(base64: base64)
+        } catch {
+            self.logger.warning("active appendVideo failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func handleDescribeViewToolCall(callId: String) async {
+        self.onStatus(TalkModeManager.cameraLookingStatus)
+        // Always reset status on exit; self-contained so the outer catch is never reached.
+        defer { self.onStatus("Listening (Realtime)") }
+
+        let base64 = await cameraController?.snapForTalk(maxWidth: 480)
+
+        let provider = self.options.provider?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let isGemini = provider.contains("gemini") || provider.contains("google")
+
+        do {
+            if let base64, !base64.isEmpty {
+                if isGemini {
+                    // Gemini passive: embed imageFrame directly in the tool result.
+                    try await self.submitToolResult(
+                        callId: callId,
+                        result: ["result": "Here is the current camera view."],
+                        imageFrame: (data: base64, mimeType: "image/jpeg"))
+                } else {
+                    // OpenAI passive: appendVideo injects the frame, then submitToolResult
+                    // answers the tool call. If appendVideo fails, submit a failure message
+                    // so the model knows no image arrived rather than being told one did.
+                    var frameDelivered = true
+                    do {
+                        try await self.appendVideo(base64: base64)
+                    } catch {
+                        frameDelivered = false
+                        self.logger
+                            .warning(
+                                "describe_view appendVideo failed: \(error.localizedDescription, privacy: .public)")
+                    }
+                    let resultText = frameDelivered
+                        ? "Here is the current camera view."
+                        : "Camera unavailable — frame could not be delivered."
+                    try await self.submitToolResult(callId: callId, result: ["result": resultText])
+                }
+            } else {
+                try await self.submitToolResult(
+                    callId: callId,
+                    result: ["result": "Camera unavailable — no image captured."])
+            }
+        } catch {
+            // Best-effort: tell the model the tool failed rather than leaving it hanging.
+            self.logger
+                .warning("describe_view submitToolResult failed: \(error.localizedDescription, privacy: .public)")
+            try? await self.submitToolResult(callId: callId, result: [
+                "error": "Camera tool call failed.",
+            ])
+        }
     }
 
     private func waitForChatCompletion(

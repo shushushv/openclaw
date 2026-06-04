@@ -3,7 +3,44 @@ import Foundation
 import OpenClawKit
 import os
 
+/// AVCapturePhotoOutput is documented thread-safe for capture operations.
+extension AVCapturePhotoOutput: @unchecked Sendable {}
+
 actor CameraController {
+    // MARK: - User-configurable state
+
+    /// Whether the camera is allowed to capture for talk (describe_view tool calls).
+    var isEnabled: Bool = false
+    /// Which camera to use for talk snaps.
+    var preferredFacing: OpenClawCameraFacing = .front
+
+    /// Enables or disables the camera and starts/stops the shared session atomically.
+    /// Returns the running session when enabled, nil when disabled.
+    func applyEnabled(_ enabled: Bool) async -> AVCaptureSession? {
+        self.isEnabled = enabled
+        if enabled {
+            return try? await self.startSharedSession()
+        } else {
+            self.stopSharedSession()
+            return nil
+        }
+    }
+
+    /// Updates the preferred facing. Restarts the shared session only when enabled.
+    /// Returns the running session if enabled, nil if disabled (facing is still persisted).
+    func applyFacing(_ facing: OpenClawCameraFacing) async -> AVCaptureSession? {
+        self.preferredFacing = facing
+        guard self.isEnabled else { return nil }
+        let session = try? await self.startSharedSession()
+        // Re-check after suspension: applyEnabled(false) may have run while
+        // startSharedSession was awaiting hardware access.
+        guard self.isEnabled else {
+            self.stopSharedSession()
+            return nil
+        }
+        return session
+    }
+
     struct CameraDeviceInfo: Codable {
         var id: String
         var name: String
@@ -34,6 +71,130 @@ actor CameraController {
             case let .exportFailed(msg):
                 msg
             }
+        }
+    }
+
+    // MARK: - Shared persistent session (preview + snapForTalk)
+
+    /// Running while camera is enabled; shared between preview layer and snapForTalk.
+    /// Eliminates the per-snap session startup cost (~500 ms) and prevents the
+    /// hardware interruption that freezes the preview when a second session starts.
+    private var sharedSession: AVCaptureSession?
+    private var sharedPhotoOutput: AVCapturePhotoOutput?
+
+    // MARK: - Active streaming
+
+    private var streamingTask: Task<Void, Never>?
+
+    /// Starts periodic JPEG frame capture at the given fps, calling onFrame for each captured frame.
+    /// Replaces any existing stream. Frames stop when stopStreaming() is called or the actor is released.
+    /// onFrame is called sequentially — the next snap begins only after onFrame returns.
+    func startStreaming(fps: Double = 1.0, onFrame: @Sendable @escaping (String) async -> Void) {
+        self.streamingTask?.cancel()
+        let intervalNs = UInt64(1_000_000_000.0 / max(0.1, min(fps, 5.0)))
+        self.streamingTask = Task {
+            while !Task.isCancelled {
+                if let base64 = await self.snapForTalk(maxWidth: 480), !base64.isEmpty,
+                   !Task.isCancelled
+                {
+                    await onFrame(base64)
+                }
+                try? await Task.sleep(nanoseconds: intervalNs)
+            }
+        }
+    }
+
+    func stopStreaming() {
+        self.streamingTask?.cancel()
+        self.streamingTask = nil
+    }
+
+    /// Start (or switch) the shared session for the current preferred facing.
+    /// Returns the running session so CameraPreviewView can attach its preview layer.
+    @discardableResult
+    func startSharedSession() async throws -> AVCaptureSession {
+        try await self.ensureAccess(for: .video)
+        let position: AVCaptureDevice.Position = self.preferredFacing == .front ? .front : .back
+
+        // Reuse if the current session is already running on the right camera.
+        if let s = sharedSession, s.isRunning,
+           (s.inputs.compactMap { $0 as? AVCaptureDeviceInput }.first?.device.position) == position
+        { return s }
+
+        self.sharedSession?.stopRunning()
+        self.sharedSession = nil
+        self.sharedPhotoOutput = nil
+
+        guard
+            let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+            ?? AVCaptureDevice.default(for: .video),
+            let input = try? AVCaptureDeviceInput(device: device)
+        else { throw CameraError.cameraUnavailable }
+
+        let s = AVCaptureSession()
+        s.sessionPreset = .photo
+        s.beginConfiguration()
+        guard s.canAddInput(input) else {
+            s.commitConfiguration()
+            throw CameraError.cameraUnavailable
+        }
+        s.addInput(input)
+        let photoOutput = AVCapturePhotoOutput()
+        if s.canAddOutput(photoOutput) {
+            s.addOutput(photoOutput)
+            self.sharedPhotoOutput = photoOutput
+        }
+        s.commitConfiguration()
+
+        self.sharedSession = s
+        s.startRunning()
+        return s
+    }
+
+    func stopSharedSession() {
+        self.sharedSession?.stopRunning()
+        self.sharedSession = nil
+        self.sharedPhotoOutput = nil
+    }
+
+    // MARK: - Quick snap for talk (no URL prefix, 480p)
+
+    /// Captures a single JPEG frame suitable for voice tool calls.
+    /// Returns raw base64 (no data:URL prefix). Returns nil when disabled or permission denied.
+    func snapForTalk(maxWidth: Int = 480) async -> String? {
+        guard self.isEnabled else { return nil }
+        do { try await self.ensureAccess(for: .video) } catch { return nil }
+
+        // Fast path: shared session already running, no startup cost.
+        if let output = sharedPhotoOutput, let s = sharedSession, s.isRunning {
+            return await self.captureJPEGFromOutput(output, maxWidth: maxWidth, quality: 0.75)
+        }
+
+        // Slow fallback: shared session not ready yet (race during startup).
+        let params = OpenClawCameraSnapParams(
+            facing: preferredFacing,
+            maxWidth: maxWidth,
+            quality: 0.75,
+            format: .jpg,
+            deviceId: nil,
+            delayMs: 0)
+        return await (try? self.snap(params: params))?.base64
+    }
+
+    private func captureJPEGFromOutput(
+        _ output: AVCapturePhotoOutput,
+        maxWidth: Int,
+        quality: Double) async -> String?
+    {
+        do {
+            let rawData = try await CameraCapturePipelineSupport.capturePhotoData(output: output) {
+                PhotoCaptureDelegate($0)
+            }
+            let res = try PhotoCapture.transcodeJPEGForGateway(
+                rawData: rawData, maxWidthPx: maxWidth, quality: quality)
+            return res.data.base64EncodedString()
+        } catch {
+            return nil
         }
     }
 

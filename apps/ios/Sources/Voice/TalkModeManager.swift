@@ -7,6 +7,28 @@ import OpenClawProtocol
 import OSLog
 import Speech
 
+private final class BoolBox: @unchecked Sendable {
+    // os_unfair_lock is safe for audio-thread reads: no priority inversion, unlike NSLock.
+    private var lock = os_unfair_lock()
+    private var valueInternal: Bool
+
+    init(_ initial: Bool = false) {
+        self.valueInternal = initial
+    }
+
+    func set(_ value: Bool) {
+        os_unfair_lock_lock(&self.lock)
+        self.valueInternal = value
+        os_unfair_lock_unlock(&self.lock)
+    }
+
+    var value: Bool {
+        os_unfair_lock_lock(&self.lock)
+        defer { os_unfair_lock_unlock(&self.lock) }
+        return self.valueInternal
+    }
+}
+
 private final class StreamFailureBox: @unchecked Sendable {
     private let lock = NSLock()
     private var valueInternal: Error?
@@ -31,6 +53,13 @@ private final class StreamFailureBox: @unchecked Sendable {
 @MainActor
 @Observable
 final class TalkModeManager: NSObject {
+    enum VideoMode {
+        /// Passive: camera only activates when the model calls describe_view.
+        case passive
+        /// Active: frames are continuously pushed to the model at ~1fps.
+        case active
+    }
+
     private typealias SpeechRequest = SFSpeechAudioBufferRecognitionRequest
     private static let defaultModelIdFallback = "eleven_v3"
     private static let defaultRealtimeModelIdFallback = "gpt-realtime-2"
@@ -38,6 +67,9 @@ final class TalkModeManager: NSObject {
     private static let defaultSilenceTimeoutMs = TalkDefaults.silenceTimeoutMs
     private static let redactedConfigSentinel = "__OPENCLAW_REDACTED__"
     private static let realtimePrefetchExpiryLeewaySeconds: TimeInterval = 30
+    /// Status string emitted while a describe_view tool call is in progress.
+    /// Shared with relay/WebRTC sessions so all parties use the same literal.
+    nonisolated static let cameraLookingStatus = "Looking…"
     var isEnabled: Bool = false
     var isListening: Bool = false
     var isSpeaking: Bool = false
@@ -101,6 +133,74 @@ final class TalkModeManager: NSObject {
     private var realtimeRelayStartInFlight = false
     private var prefetchedRealtimeSession: TalkRealtimeClientSession?
     private var realtimePrefetchTask: Task<Void, Never>?
+    /// True while a describe_view camera session is active (streaming or snap in progress).
+    var isCameraActive: Bool = false
+    /// Video mode for realtime sessions. Passive = describe_view only. Active = continuous ~1fps push.
+    var videoMode: VideoMode = .passive
+    /// Whether camera sharing (describe_view tool) is user-enabled.
+    var isCameraEnabled: Bool = false {
+        didSet {
+            let enabled = self.isCameraEnabled
+            if !enabled {
+                self.cameraSharedSession = nil
+                // Stop active streaming immediately so the CameraController Task loop
+                // doesn't keep sleeping and calling snapForTalk every ~1s.
+                self.realtimeSession?.stopActiveStreaming()
+                self.realtimeRelaySession?.stopActiveStreaming()
+            }
+            // Separate counter from cameraFacingGeneration: facing flips must not
+            // invalidate an in-flight enable/disable Task or vice-versa.
+            self.cameraEnableGeneration &+= 1
+            let gen = self.cameraEnableGeneration
+            Task { [weak self] in
+                guard let self else { return }
+                let session = await self.cameraController.applyEnabled(enabled)
+                guard self.cameraEnableGeneration == gen else { return }
+                self.cameraSharedSession = session
+                // Start active streaming AFTER applyEnabled sets CameraController.isEnabled = true,
+                // so snapForTalk returns frames immediately rather than silently yielding nil.
+                if enabled, self.videoMode == .active {
+                    self.realtimeSession?.startActiveStreaming()
+                    self.realtimeRelaySession?.startActiveStreaming()
+                }
+            }
+        }
+    }
+
+    // Two independent generation counters so enable/disable and facing-flip Tasks
+    // cannot invalidate each other — they update cameraSharedSession independently.
+    private var cameraEnableGeneration: Int = 0
+    private var cameraFacingGeneration: Int = 0
+
+    /// The running AVCaptureSession shared between CameraPreviewView and snapForTalk.
+    /// Non-nil while isCameraEnabled is true and the session has started.
+    var cameraSharedSession: AVCaptureSession?
+
+    /// Preferred camera for talk snaps (front/back).
+    var preferredCameraFacing: OpenClawCameraFacing = .front {
+        didSet {
+            let facing = self.preferredCameraFacing
+            self.cameraFacingGeneration &+= 1
+            let gen = self.cameraFacingGeneration
+            Task { [weak self] in
+                guard let self else { return }
+                let session = await self.cameraController.applyFacing(facing)
+                guard self.cameraFacingGeneration == gen else { return }
+                // Guard against writing a non-nil session after a disable has
+                // already cleared cameraSharedSession (isCameraEnabled.didSet owns nil).
+                guard self.isCameraEnabled else { return }
+                if let session { self.cameraSharedSession = session }
+            }
+        }
+    }
+
+    /// Whether the microphone is muted (audio capture continues but speech is not forwarded).
+    var isMicMuted: Bool = false {
+        didSet { self.micMuteBox.set(self.isMicMuted) }
+    }
+
+    private let micMuteBox = BoolBox()
+    private let cameraController = CameraController()
 
     private var lastHeard: Date?
     private var lastTranscript: String = ""
@@ -373,6 +473,9 @@ final class TalkModeManager: NSObject {
 
     func stop() {
         self.isEnabled = false
+        self.isMicMuted = false
+        if self.isCameraEnabled { self.isCameraEnabled = false }
+        self.cameraSharedSession = nil
         self.cancelPendingStart()
         self.isListening = false
         self.isUserSpeechDetected = false
@@ -408,6 +511,20 @@ final class TalkModeManager: NSObject {
             self.logger.warning("audio session deactivate failed: \(error.localizedDescription, privacy: .public)")
         }
         Task { await self.unsubscribeAllChats() }
+    }
+
+    // MARK: - User controls
+
+    func toggleMicMute() {
+        self.isMicMuted.toggle()
+    }
+
+    func toggleCameraEnabled() {
+        self.isCameraEnabled.toggle()
+    }
+
+    func flipCamera() {
+        self.preferredCameraFacing = self.preferredCameraFacing == .front ? .back : .front
     }
 
     /// Suspends microphone usage without disabling Talk Mode.
@@ -748,7 +865,8 @@ final class TalkModeManager: NSObject {
             }
         }
         self.audioTapDiagnostics = tapDiagnostics
-        let tapBlock = Self.makeAudioTapAppendCallback(request: request, diagnostics: tapDiagnostics)
+        let tapBlock = Self.makeAudioTapAppendCallback(
+            request: request, diagnostics: tapDiagnostics, muteBox: self.micMuteBox)
         input.installTap(onBus: 0, bufferSize: 2048, format: format, block: tapBlock)
         self.inputTapInstalled = true
 
@@ -849,10 +967,13 @@ final class TalkModeManager: NSObject {
 
     private nonisolated static func makeAudioTapAppendCallback(
         request: SpeechRequest,
-        diagnostics: AudioTapDiagnostics) -> AVAudioNodeTapBlock
+        diagnostics: AudioTapDiagnostics,
+        muteBox: BoolBox) -> AVAudioNodeTapBlock
     {
         { buffer, _ in
-            request.append(buffer)
+            if !muteBox.value {
+                request.append(buffer)
+            }
             diagnostics.onBuffer(buffer)
         }
     }
@@ -1060,6 +1181,7 @@ final class TalkModeManager: NSObject {
             gateway: gateway,
             sessionKey: mainSessionKey,
             delegate: self)
+        session.cameraController = self.cameraController
         self.realtimeSession = session
         do {
             try await session.start(
@@ -1070,6 +1192,9 @@ final class TalkModeManager: NSObject {
             guard self.realtimeSession === session, self.isEnabled else {
                 session.stop()
                 return true
+            }
+            if self.videoMode == .active, self.isCameraEnabled {
+                session.startActiveStreaming()
             }
             self.isListening = true
             self.captureMode = .continuous
@@ -1124,6 +1249,11 @@ final class TalkModeManager: NSObject {
             pcmPlayer: self.pcmPlayer,
             onStatus: { [weak self] status in
                 guard let self else { return }
+                if status == TalkModeManager.cameraLookingStatus {
+                    self.isCameraActive = true
+                } else if self.isCameraActive {
+                    self.isCameraActive = false
+                }
                 self.statusText = status
                 self.isListening = status.localizedCaseInsensitiveContains("listening")
                 if status.localizedCaseInsensitiveContains("thinking") {
@@ -1139,6 +1269,7 @@ final class TalkModeManager: NSObject {
                     self.isListening = false
                 }
             })
+        relaySession.cameraController = self.cameraController
         self.realtimeRelaySession = relaySession
         do {
             try Self.configureRealtimeAudioSession()
@@ -1146,6 +1277,9 @@ final class TalkModeManager: NSObject {
             guard self.realtimeRelaySession === relaySession, self.isEnabled else {
                 relaySession.stop()
                 return true
+            }
+            if self.videoMode == .active, self.isCameraEnabled {
+                relaySession.startActiveStreaming()
             }
             self.isListening = true
             self.captureMode = .continuous
@@ -1241,6 +1375,7 @@ final class TalkModeManager: NSObject {
         self.realtimeSession = nil
         self.realtimeRelaySession?.stop()
         self.realtimeRelaySession = nil
+        self.isCameraActive = false
     }
 
     private func subscribeChatIfNeeded(sessionKey: String) async {
@@ -2839,6 +2974,11 @@ extension TalkModeManager: TalkRealtimeWebRTCSessionDelegate {
         self.statusText = status
         self.isListening = status == "Listening"
         self.isSpeaking = status == "Speaking"
+        if status == TalkModeManager.cameraLookingStatus {
+            self.isCameraActive = true
+        } else if self.isCameraActive {
+            self.isCameraActive = false
+        }
         if status == "Thinking" {
             self.isListening = false
             self.isSpeaking = false
@@ -2877,6 +3017,7 @@ extension TalkModeManager: TalkRealtimeWebRTCSessionDelegate {
         self.isListening = false
         self.isSpeaking = false
         self.isUserSpeechDetected = false
+        self.isCameraActive = false
         if self.isEnabled {
             self.statusText = self.gatewayConnected ? "Ready" : "Offline"
         }
