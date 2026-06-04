@@ -317,6 +317,7 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
           requested: params,
           defaults: realtimeConfig,
         });
+        const isActiveVideo = normalizeOptionalLowercaseString(params.videoMode) === "active";
         const session = createTalkRealtimeRelaySession({
           context,
           connId,
@@ -327,7 +328,7 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
           tools: [
             REALTIME_VOICE_AGENT_CONSULT_TOOL,
             REALTIME_VOICE_AGENT_CONTROL_TOOL,
-            REALTIME_VOICE_DESCRIBE_VIEW_TOOL,
+            ...(isActiveVideo ? [] : [REALTIME_VOICE_DESCRIBE_VIEW_TOOL]),
           ],
           model: launchOptions.model,
           sessionKey: normalizeOptionalString(params.sessionKey),
@@ -726,6 +727,7 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
         callId: params.callId,
         result: params.result,
         options: params.options,
+        imageFrame: params.imageFrame,
       });
       respond(true, { ok: true }, undefined);
     } catch (err) {

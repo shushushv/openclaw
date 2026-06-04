@@ -52,6 +52,7 @@ export const talkClientHandlers: GatewayRequestHandlers = {
       mode?: string;
       transport?: string;
       brain?: string;
+      videoMode?: string;
     };
     try {
       const runtimeConfig = context.getRuntimeConfig();
@@ -121,11 +122,16 @@ export const talkClientHandlers: GatewayRequestHandlers = {
         defaults: realtimeConfig,
       });
       if (resolution.provider.createBrowserSession && transport !== "gateway-relay") {
+        const isActiveVideo = normalizeOptionalLowercaseString(typedParams.videoMode) === "active";
         const session = await resolution.provider.createBrowserSession({
           cfg: runtimeConfig,
           providerConfig: resolution.providerConfig,
           instructions: buildRealtimeInstructions(realtimeConfig.instructions),
-          tools: [REALTIME_VOICE_AGENT_CONSULT_TOOL, REALTIME_VOICE_AGENT_CONTROL_TOOL, REALTIME_VOICE_DESCRIBE_VIEW_TOOL],
+          tools: [
+            REALTIME_VOICE_AGENT_CONSULT_TOOL,
+            REALTIME_VOICE_AGENT_CONTROL_TOOL,
+            ...(isActiveVideo ? [] : [REALTIME_VOICE_DESCRIBE_VIEW_TOOL]),
+          ],
           ...launchOptions,
         });
         if (

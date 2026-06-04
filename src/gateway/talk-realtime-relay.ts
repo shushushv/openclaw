@@ -755,6 +755,7 @@ export function submitTalkRealtimeRelayToolResult(params: {
   callId: string;
   result: unknown;
   options?: RealtimeVoiceToolResultOptions;
+  imageFrame?: { data: string; mimeType: string };
 }): void {
   const session = getRelaySession(params.relaySessionId, params.connId);
   if (session.completedAgentToolCalls.has(params.callId)) {
@@ -802,7 +803,10 @@ export function submitTalkRealtimeRelayToolResult(params: {
     });
     return;
   }
-  session.bridge.submitToolResult(params.callId, params.result, params.options);
+  const bridgeOptions: RealtimeVoiceToolResultOptions | undefined = params.imageFrame
+    ? { ...params.options, imageFrame: params.imageFrame }
+    : params.options;
+  session.bridge.submitToolResult(params.callId, params.result, bridgeOptions);
   const turnId = ensureRelayTurn(session);
   const final = params.options?.willContinue !== true;
   if (final) {

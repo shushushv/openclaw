@@ -289,4 +289,44 @@ describe("realtime voice bridge session runtime", () => {
     expect(onReady).toHaveBeenCalledWith(session);
     expect(onToolCall).toHaveBeenCalledWith(event, session);
   });
+
+  it("mounts appendVideoFrame on the session when the bridge supports it", () => {
+    const appendVideoFrame = vi.fn();
+    const bridge = makeBridge({ appendVideoFrame });
+    const provider: RealtimeVoiceProviderPlugin = {
+      id: "test",
+      label: "Test",
+      isConfigured: () => true,
+      createBridge: () => bridge,
+    };
+
+    const session = createRealtimeVoiceBridgeSession({
+      provider,
+      providerConfig: {},
+      audioSink: { sendAudio: vi.fn() },
+    });
+
+    expect(typeof session.appendVideoFrame).toBe("function");
+    const frame = { data: "abc123", mimeType: "image/jpeg" as const };
+    void session.appendVideoFrame!(frame);
+    expect(appendVideoFrame).toHaveBeenCalledWith(frame);
+  });
+
+  it("does not mount appendVideoFrame on the session when the bridge does not support it", () => {
+    const bridge = makeBridge(); // no appendVideoFrame
+    const provider: RealtimeVoiceProviderPlugin = {
+      id: "test",
+      label: "Test",
+      isConfigured: () => true,
+      createBridge: () => bridge,
+    };
+
+    const session = createRealtimeVoiceBridgeSession({
+      provider,
+      providerConfig: {},
+      audioSink: { sendAudio: vi.fn() },
+    });
+
+    expect(typeof session.appendVideoFrame).toBe("undefined");
+  });
 });

@@ -546,6 +546,22 @@ describe("validateTalkSessionRelayParams", () => {
         options: { suppressResponse: true, willContinue: true },
       }),
     ).toBe(true);
+    expect(
+      validateTalkSessionSubmitToolResultParams({
+        sessionId: "session-1",
+        callId: "call-1",
+        result: { ok: true },
+        imageFrame: { data: "/9j/abc123", mimeType: "image/jpeg" },
+      }),
+    ).toBe(true);
+    expect(
+      validateTalkSessionSubmitToolResultParams({
+        sessionId: "session-1",
+        callId: "call-1",
+        result: { ok: true },
+        imageFrame: { data: "/9j/abc123", mimeType: "image/png" },
+      }),
+    ).toBe(false);
   });
 });
 

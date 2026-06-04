@@ -177,6 +177,7 @@ export const TalkClientCreateParamsSchema = Type.Object(
     mode: Type.Optional(TalkModeSchema),
     transport: Type.Optional(TalkTransportSchema),
     brain: Type.Optional(TalkBrainSchema),
+    videoMode: Type.Optional(Type.Union([Type.Literal("active"), Type.Literal("passive")])),
   },
   { additionalProperties: false },
 );
@@ -262,6 +263,7 @@ export const TalkSessionCreateParamsSchema = Type.Object(
     transport: Type.Optional(TalkTransportSchema),
     brain: Type.Optional(TalkBrainSchema),
     ttlMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 3600000 })),
+    videoMode: Type.Optional(Type.Union([Type.Literal("active"), Type.Literal("passive")])),
   },
   { additionalProperties: false },
 );
@@ -326,6 +328,12 @@ export const TalkSessionSubmitToolResultParamsSchema = Type.Object(
           suppressResponse: Type.Optional(Type.Boolean()),
           willContinue: Type.Optional(Type.Boolean()),
         },
+        { additionalProperties: false },
+      ),
+    ),
+    imageFrame: Type.Optional(
+      Type.Object(
+        { data: NonEmptyString, mimeType: Type.Literal("image/jpeg") },
         { additionalProperties: false },
       ),
     ),

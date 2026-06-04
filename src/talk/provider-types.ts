@@ -56,6 +56,8 @@ export type RealtimeVoiceToolResultOptions = {
    */
   suppressResponse?: boolean;
   willContinue?: boolean;
+  /** Embed an image frame in the tool response (Gemini passive mode: parts[].inlineData). */
+  imageFrame?: { data: string; mimeType: string };
 };
 
 export type RealtimeVoiceBridgeEvent = {
