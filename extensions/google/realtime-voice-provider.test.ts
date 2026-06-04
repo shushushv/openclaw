@@ -897,6 +897,26 @@ describe("buildGoogleRealtimeVoiceProvider", () => {
     );
   });
 
+  it("passes raw base64 directly to sendRealtimeInput.video without adding a data-URL prefix", async () => {
+    const provider = buildGoogleRealtimeVoiceProvider();
+    const bridge = provider.createBridge({
+      providerConfig: { apiKey: "gemini-key" },
+      onAudio: vi.fn(),
+      onClearAudio: vi.fn(),
+    });
+
+    await bridge.connect();
+    lastConnectParams().callbacks.onmessage({ setupComplete: { sessionId: "s1" } });
+    session.sendRealtimeInput.mockClear();
+
+    void bridge.appendVideoFrame({ data: "abc123", mimeType: "image/jpeg" });
+
+    expect(session.sendRealtimeInput).toHaveBeenCalledOnce();
+    expect(session.sendRealtimeInput).toHaveBeenCalledWith({
+      video: { data: "abc123", mimeType: "image/jpeg" },
+    });
+  });
+
   it("reports Google Live tool response send failures without losing the call name", async () => {
     const provider = buildGoogleRealtimeVoiceProvider();
     const onError = vi.fn();

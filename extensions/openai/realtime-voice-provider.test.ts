@@ -2106,4 +2106,39 @@ describe("buildOpenAIRealtimeVoiceProvider", () => {
     expect(onError).not.toHaveBeenCalled();
     expect(parseSent(socket).slice(-1)).toEqual([{ type: "response.create" }]);
   });
+
+  it("injects input_image conversation item without response.create on appendVideoFrame", async () => {
+    const provider = buildOpenAIRealtimeVoiceProvider();
+    const bridge = provider.createBridge({
+      providerConfig: { apiKey: "sk-test" }, // pragma: allowlist secret
+      onAudio: vi.fn(),
+      onClearAudio: vi.fn(),
+    });
+    const connecting = bridge.connect();
+    const socket = FakeWebSocket.instances[0];
+    if (!socket) {
+      throw new Error("expected bridge to create a websocket");
+    }
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.emit("open");
+    socket.emit("message", Buffer.from(JSON.stringify({ type: "session.updated" })));
+    await connecting;
+
+    const sentBefore = parseSent(socket).length;
+    void bridge.appendVideoFrame({ data: "abc123", mimeType: "image/jpeg" });
+
+    const newEvents = parseSent(socket).slice(sentBefore);
+    expect(newEvents).toEqual([
+      {
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_image", image_url: "data:image/jpeg;base64,abc123" }],
+        },
+      },
+    ]);
+    // active push must NOT trigger a new response — VAD handles that
+    expect(newEvents.some((e) => e.type === "response.create")).toBe(false);
+  });
 });

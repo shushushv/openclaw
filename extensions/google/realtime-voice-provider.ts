@@ -127,7 +127,13 @@ type GoogleLiveSession = {
     audioStreamEnd?: boolean;
     video?: { data: string; mimeType: string };
   }) => void;
-  sendToolResponse: (params: { functionResponses: FunctionResponse[] | FunctionResponse }) => void;
+  sendToolResponse: (params: {
+    functionResponses:
+      | Array<
+          FunctionResponse & { parts?: Array<{ inlineData: { data: string; mimeType: string } }> }
+        >
+      | FunctionResponse;
+  }) => void;
   close: () => void;
 };
 
@@ -605,7 +611,9 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
     }
     try {
       const isConsultTool = name === REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME;
-      const functionResponse: FunctionResponse = {
+      const functionResponse: FunctionResponse & {
+        parts?: Array<{ inlineData: { data: string; mimeType: string } }>;
+      } = {
         id: callId,
         name,
         response:
@@ -625,6 +633,9 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
           ),
         );
         return;
+      }
+      if (options?.imageFrame) {
+        functionResponse.parts = [{ inlineData: options.imageFrame }];
       }
       this.session.sendToolResponse({
         functionResponses: [functionResponse],
