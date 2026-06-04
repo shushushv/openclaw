@@ -381,7 +381,7 @@ describe("WebRtcSdpRealtimeTalkTransport", () => {
     peer?.channel.dispatchEvent(
       new MessageEvent("message", {
         data: JSON.stringify({
-          type: "response.audio_transcript.done",
+          type: "response.output_audio_transcript.done",
           item_id: "response-1",
           transcript: "hi there",
         }),
@@ -409,6 +409,68 @@ describe("WebRtcSdpRealtimeTalkTransport", () => {
     expect(assistantTranscriptEvent.payload).toEqual({ text: "hi there" });
     expect(assistantTranscriptEvent.sessionId).toBe("main:openai:webrtc");
     expect(assistantTranscriptEvent.transport).toBe("webrtc");
+    transport.stop();
+  });
+
+  it("emits assistant transcript deltas from current OpenAI Realtime event names", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("answer-sdp")) as unknown as typeof fetch,
+    );
+    const onTranscript = vi.fn();
+    const onTalkEvent = vi.fn();
+    const transport = new WebRtcSdpRealtimeTalkTransport(
+      {
+        provider: "openai",
+        transport: "webrtc",
+        clientSecret: "client-secret-123",
+      },
+      {
+        client: {} as never,
+        sessionKey: "main",
+        callbacks: { onTranscript, onTalkEvent },
+      },
+    );
+
+    await transport.start();
+    const peer = FakePeerConnection.instances[0];
+    peer?.channel.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "response.output_audio_transcript.delta",
+          item_id: "response-1",
+          delta: "hi",
+        }),
+      }),
+    );
+    peer?.channel.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "response.output_text.done",
+          item_id: "response-1",
+          text: "hi there",
+        }),
+      }),
+    );
+
+    expect(onTranscript).toHaveBeenCalledWith({
+      role: "assistant",
+      text: "hi",
+      final: false,
+    });
+    expect(onTranscript).toHaveBeenCalledWith({
+      role: "assistant",
+      text: "hi there",
+      final: true,
+    });
+    expect(onTalkEvent.mock.calls.map(([event]) => event.type)).toEqual([
+      "output.text.delta",
+      "output.text.done",
+    ]);
+    expect(onTalkEvent.mock.calls.map(([event]) => event.payload)).toEqual([
+      { text: "hi" },
+      { text: "hi there" },
+    ]);
     transport.stop();
   });
 

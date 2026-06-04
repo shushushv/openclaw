@@ -121,6 +121,22 @@ export type RealtimeTalkTransportContext = {
   captureVideoFrame?: VideoCaptureCallback;
 };
 
+// provider × transport × mode capability matrix, derived from spike results
+const VIDEO_CAPABILITY_MAP: Record<string, Partial<Record<string, Record<VideoMode, boolean>>>> = {
+  openai: {
+    webrtc: { active: true, passive: true },
+    "gateway-relay": { active: true, passive: true },
+  },
+  google: {
+    "provider-websocket": { active: true, passive: true },
+    "gateway-relay": { active: true, passive: true },
+  },
+};
+
+export function videoModeSupported(provider: string, transport: string, mode: VideoMode): boolean {
+  return VIDEO_CAPABILITY_MAP[provider]?.[transport]?.[mode] ?? false;
+}
+
 export class VideoFrameThrottle {
   private lastData: string | null = null;
   readonly intervalMs: number;

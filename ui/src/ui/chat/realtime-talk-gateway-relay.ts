@@ -6,11 +6,15 @@ import {
   REALTIME_VOICE_DESCRIBE_VIEW_TOOL_NAME,
   submitRealtimeTalkAgentControl,
   submitRealtimeTalkConsult,
+  videoModeSupported,
   type RealtimeTalkGatewayRelaySessionResult,
   type RealtimeTalkEvent,
   type RealtimeTalkTransport,
   type RealtimeTalkTransportContext,
+  type VideoFrame,
+  type VideoMode,
 } from "./realtime-talk-shared.ts";
+import { TalkRelayTracer } from "./realtime-talk-trace.ts";
 
 type GatewayRelayEvent = {
   relaySessionId?: string;
@@ -18,6 +22,7 @@ type GatewayRelayEvent = {
 } & (
   | { type?: "ready" }
   | { type?: "audio"; audioBase64?: string }
+  | { type?: "audioDone"; itemId?: string; responseId?: string }
   | { type?: "clear" }
   | { type?: "mark"; markName?: string }
   | {
@@ -38,6 +43,8 @@ type GatewayRelayEvent = {
   | { type?: "close"; reason?: string }
 );
 
+type AppendVideoResult = { ok: true } | { ok: false; reason: "unsupported" };
+
 const BARGE_IN_RMS_THRESHOLD = 0.02;
 const BARGE_IN_PEAK_THRESHOLD = 0.08;
 const BARGE_IN_CONSECUTIVE_SPEECH_FRAMES = 2;
@@ -56,16 +63,20 @@ export class GatewayRelayRealtimeTalkTransport implements RealtimeTalkTransport 
   private cancelRequestedForPlayback = false;
   private speechFramesDuringPlayback = 0;
   private lastRelayError: string | undefined;
+  private readonly tracer: TalkRelayTracer;
 
   constructor(
     private readonly session: RealtimeTalkGatewayRelaySessionResult,
     private readonly ctx: RealtimeTalkTransportContext,
-  ) {}
+  ) {
+    this.tracer = new TalkRelayTracer(ctx.sessionKey, session.provider);
+  }
 
   async start(): Promise<void> {
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error("Realtime Talk requires browser microphone access");
     }
+    this.tracer.onConnecting(this.session.model, this.ctx.videoMode);
     if (
       this.session.audio.inputEncoding !== "pcm16" ||
       this.session.audio.outputEncoding !== "pcm16"
@@ -166,13 +177,18 @@ export class GatewayRelayRealtimeTalkTransport implements RealtimeTalkTransport 
     switch (event.type) {
       case "ready":
         this.ctx.callbacks.onStatus?.("listening");
+        this.tracer.onReady();
         return;
       case "audio":
         if (event.audioBase64) {
+          this.tracer.onAudioChunk();
           this.cancelRequestedForPlayback = false;
           this.speechFramesDuringPlayback = 0;
           this.playPcm16(event.audioBase64);
         }
+        return;
+      case "audioDone":
+        this.tracer.onAudioDone();
         return;
       case "clear":
         this.stopOutput();
@@ -181,6 +197,9 @@ export class GatewayRelayRealtimeTalkTransport implements RealtimeTalkTransport 
         this.scheduleMarkAck();
         return;
       case "transcript":
+        if (event.role === "user" && event.final) {
+          this.tracer.onUserTranscriptFinal();
+        }
         if (event.role && event.text) {
           this.ctx.callbacks.onTranscript?.({
             role: event.role,
@@ -190,6 +209,7 @@ export class GatewayRelayRealtimeTalkTransport implements RealtimeTalkTransport 
         }
         return;
       case "toolCall":
+        this.tracer.onToolCall(event.name, event.callId);
         void this.handleToolCall(event);
         return;
       case "toolResult":
@@ -202,6 +222,7 @@ export class GatewayRelayRealtimeTalkTransport implements RealtimeTalkTransport 
         this.ctx.callbacks.onStatus?.("error", this.lastRelayError);
         return;
       case "close":
+        this.tracer.onClose(event.reason);
         this.abortConsults();
         if (!this.closed) {
           this.ctx.callbacks.onStatus?.(
@@ -253,11 +274,7 @@ export class GatewayRelayRealtimeTalkTransport implements RealtimeTalkTransport 
       return;
     }
     if (name === REALTIME_VOICE_DESCRIBE_VIEW_TOOL_NAME) {
-      // Path B (inline image injection) requires WebRTC transport; relay cannot forward raw
-      // conversation.item.create events with images. Return a graceful fallback.
-      this.submitToolResult(callId, {
-        error: "describe_view is only available in Video Talk (WebRTC) mode.",
-      });
+      await this.handleDescribeViewToolCall(callId);
       return;
     }
     if (name !== REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME) {
@@ -266,6 +283,7 @@ export class GatewayRelayRealtimeTalkTransport implements RealtimeTalkTransport 
     }
     const abortController = new AbortController();
     this.consultAbortControllers.set(callId, abortController);
+    const consultStartedAt = this.tracer.onAgentConsultStarted(callId);
     try {
       if (event.forced) {
         this.submitToolResult(
@@ -287,24 +305,87 @@ export class GatewayRelayRealtimeTalkTransport implements RealtimeTalkTransport 
         signal: abortController.signal,
         submit: (toolCallId, result) => this.submitToolResult(toolCallId, result),
       });
+      this.tracer.onAgentConsultCompleted(callId, consultStartedAt);
     } finally {
       this.consultAbortControllers.delete(callId);
+    }
+  }
+
+  async appendVideoFrame(frame: VideoFrame): Promise<void> {
+    const result = await this.ctx.client.request<AppendVideoResult>("talk.session.appendVideo", {
+      sessionId: this.session.relaySessionId,
+      frame: { data: frame.data, mimeType: frame.mimeType },
+    });
+    if (!result?.ok && result?.reason === "unsupported") {
+      throw new Error("Video frames are not supported by this provider or transport.");
+    }
+    this.tracer.onVideoFrameSent(Math.round((frame.data.length * 3) / 4), frame.mimeType);
+  }
+
+  supportsVideoMode(mode: VideoMode): boolean {
+    return videoModeSupported(this.session.provider, this.session.transport, mode);
+  }
+
+  // OpenAI: inject image via appendVideo first (ordering critical), then send text tool result.
+  // Gemini: embed image directly in tool response parts (Path A via imageFrame option).
+  private async handleDescribeViewToolCall(callId: string): Promise<void> {
+    if (!this.ctx.captureVideoFrame) {
+      this.tracer.onDescribeViewUnavailable(callId);
+      this.submitToolResult(callId, {
+        error: "Camera not available. Describe the current situation based on audio context.",
+      });
+      return;
+    }
+    try {
+      const captureStart = Date.now();
+      const frame = await this.ctx.captureVideoFrame();
+      if (!frame) {
+        this.tracer.onDescribeViewUnavailable(callId);
+        this.submitToolResult(callId, {
+          result: "Camera not ready. Describe the current situation based on audio context.",
+        });
+        return;
+      }
+      this.tracer.onDescribeViewCaptured(
+        callId,
+        Date.now() - captureStart,
+        Math.round((frame.data.length * 3) / 4),
+        frame.mimeType,
+      );
+      if (this.session.provider === "google") {
+        this.submitToolResult(
+          callId,
+          { result: "Image captured. Please describe what you see." },
+          { imageFrame: frame },
+        );
+      } else {
+        await this.appendVideoFrame(frame);
+        this.submitToolResult(callId, { result: "Image captured. Please describe what you see." });
+      }
+      this.tracer.onDescribeViewSent(callId);
+    } catch (err) {
+      this.tracer.onDescribeViewUnavailable(callId);
+      this.submitToolResult(callId, {
+        error: err instanceof Error ? err.message : "Camera capture failed.",
+      });
     }
   }
 
   private submitToolResult(
     callId: string,
     result: unknown,
-    options?: { suppressResponse?: boolean; willContinue?: boolean },
+    options?: { suppressResponse?: boolean; willContinue?: boolean; imageFrame?: VideoFrame },
   ): void {
     if (this.completedToolCalls.has(callId)) {
       return;
     }
+    const { imageFrame, ...restOptions } = options ?? {};
     void this.ctx.client.request("talk.session.submitToolResult", {
       sessionId: this.session.relaySessionId,
       callId,
       result,
-      ...(options ? { options } : {}),
+      ...(Object.keys(restOptions).length > 0 ? { options: restOptions } : {}),
+      ...(imageFrame ? { imageFrame } : {}),
     });
   }
 

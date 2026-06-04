@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GatewayRelayRealtimeTalkTransport } from "./chat/realtime-talk-gateway-relay.ts";
 import {
   REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
+  REALTIME_VOICE_DESCRIBE_VIEW_TOOL_NAME,
   type RealtimeTalkEvent,
   type RealtimeTalkGatewayRelaySessionResult,
   type RealtimeTalkTransportContext,
@@ -73,6 +74,13 @@ function createSession(): RealtimeTalkGatewayRelaySessionResult {
       outputEncoding: "pcm16",
       outputSampleRateHz: 24000,
     },
+  };
+}
+
+function createGoogleRelaySession(): RealtimeTalkGatewayRelaySessionResult {
+  return {
+    ...createSession(),
+    provider: "google",
   };
 }
 
@@ -577,6 +585,95 @@ describe("GatewayRelayRealtimeTalkTransport", () => {
           status: "cancelled",
           message: "Cancelled the active OpenClaw run.",
         },
+      }),
+    );
+    transport.stop();
+  });
+
+  it("supports Gemini gateway-relay passive by embedding imageFrame in the tool result", async () => {
+    const client = createClient();
+    const captureVideoFrame = vi.fn(async () => ({
+      data: "jpeg-base64",
+      mimeType: "image/jpeg" as const,
+    }));
+    const transport = new GatewayRelayRealtimeTalkTransport(createGoogleRelaySession(), {
+      callbacks: {},
+      captureVideoFrame,
+      client,
+      sessionKey: "main",
+      videoEnabled: true,
+      videoMode: "passive",
+    });
+
+    await transport.start();
+    emitGatewayFrame({
+      event: "talk.event",
+      payload: {
+        relaySessionId: "relay-1",
+        type: "toolCall",
+        callId: "call-1",
+        name: REALTIME_VOICE_DESCRIBE_VIEW_TOOL_NAME,
+      },
+    });
+
+    // Gemini relay passive: frame is captured and embedded in imageFrame, not via appendVideo
+    await vi.waitFor(() =>
+      expect(client["request"]).toHaveBeenCalledWith("talk.session.submitToolResult", {
+        sessionId: "relay-1",
+        callId: "call-1",
+        result: { result: "Image captured. Please describe what you see." },
+        imageFrame: { data: "jpeg-base64", mimeType: "image/jpeg" },
+      }),
+    );
+    expect(captureVideoFrame).toHaveBeenCalled();
+    expect(requestCallsFor(client, "talk.session.appendVideo")).toHaveLength(0);
+    transport.stop();
+  });
+
+  it("reports appendVideo unsupported responses instead of claiming the image was captured", async () => {
+    const client = createClient();
+    vi.mocked(client["request"]).mockImplementation(async (method) => {
+      if (method === "talk.session.appendVideo") {
+        return { ok: false, reason: "unsupported" };
+      }
+      return {};
+    });
+    const transport = new GatewayRelayRealtimeTalkTransport(createSession(), {
+      callbacks: {},
+      captureVideoFrame: vi.fn(async () => ({
+        data: "jpeg-base64",
+        mimeType: "image/jpeg" as const,
+      })),
+      client,
+      sessionKey: "main",
+      videoEnabled: true,
+      videoMode: "passive",
+    });
+
+    await transport.start();
+    emitGatewayFrame({
+      event: "talk.event",
+      payload: {
+        relaySessionId: "relay-1",
+        type: "toolCall",
+        callId: "call-1",
+        name: REALTIME_VOICE_DESCRIBE_VIEW_TOOL_NAME,
+      },
+    });
+
+    await vi.waitFor(() =>
+      expect(client["request"]).toHaveBeenCalledWith("talk.session.submitToolResult", {
+        sessionId: "relay-1",
+        callId: "call-1",
+        result: {
+          error: "Video frames are not supported by this provider or transport.",
+        },
+      }),
+    );
+    expect(client["request"]).not.toHaveBeenCalledWith(
+      "talk.session.submitToolResult",
+      expect.objectContaining({
+        result: { result: "Image captured. Please describe what you see." },
       }),
     );
     transport.stop();

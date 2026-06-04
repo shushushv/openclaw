@@ -76,7 +76,6 @@ function resolveTransport(session: RealtimeTalkSessionResult): string {
 
 const CLIENT_ONLY_LAUNCH_KEYS = new Set<keyof RealtimeTalkLaunchOptions>([
   "videoEnabled",
-  "videoMode",
   "captureVideoFrame",
 ]);
 
@@ -122,6 +121,17 @@ export class RealtimeTalkSession {
       videoMode: this.options.videoMode,
       captureVideoFrame: this.options.captureVideoFrame,
     });
+    if (
+      this.options.videoEnabled &&
+      this.options.videoMode &&
+      this.transport.supportsVideoMode?.(this.options.videoMode) === false
+    ) {
+      const transport = resolveTransport(session);
+      const message = `Video mode "${this.options.videoMode}" is not supported for ${session.provider} ${transport}. Please choose a supported video mode or start audio-only Talk.`;
+      this.transport.stop();
+      this.transport = null;
+      throw new Error(message);
+    }
     await this.transport.start();
     if (this.options.videoMode === "active" && this.options.captureVideoFrame) {
       this.startActiveVideoTimer();
@@ -151,6 +161,13 @@ export class RealtimeTalkSession {
           return;
         }
         await this.transport.appendVideoFrame(frame);
+      } catch {
+        // appendVideoFrame failed (e.g. provider returned unsupported); stop the timer
+        // so we don't spam errors every second. Voice continues uninterrupted.
+        if (this.activeVideoTimer !== null) {
+          clearInterval(this.activeVideoTimer);
+          this.activeVideoTimer = null;
+        }
       } finally {
         this.videoInFlight = false;
       }
@@ -201,7 +218,9 @@ export class RealtimeTalkSession {
     const lastFrame = this.lastVideoFramePromise;
     this.lastVideoFramePromise = null;
     if (lastFrame) {
-      const timeout = new Promise<void>((resolve) => setTimeout(resolve, 500));
+      const timeout = new Promise<void>((resolve) => {
+        setTimeout(resolve, 500);
+      });
       void Promise.race([lastFrame, timeout]).finally(() => {
         this.transport?.stop();
         this.transport = null;

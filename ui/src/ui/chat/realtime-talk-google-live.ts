@@ -17,6 +17,7 @@ import {
   type VideoFrame,
   type VideoMode,
 } from "./realtime-talk-shared.ts";
+import { TalkGoogleLiveTracer } from "./realtime-talk-trace.ts";
 
 type GoogleLiveMessage = {
   setupComplete?: unknown;
@@ -75,14 +76,6 @@ export function buildGoogleLiveUrl(session: RealtimeTalkJsonPcmWebSocketSessionR
   return url.toString();
 }
 
-// Emit a structured trace event to the browser console so talk-trace skill
-// can collect it via Chrome DevTools Protocol (list_console_messages).
-function talkTrace(sessionKey: string, event: Record<string, unknown>): void {
-  console.log(
-    JSON.stringify({ __talkTrace: true, t: Date.now(), sessionKey, provider: "google", ...event }),
-  );
-}
-
 export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
   private ws: WebSocket | null = null;
   private media: MediaStream | null = null;
@@ -93,18 +86,16 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
   private closed = false;
   private pendingCalls = new Map<string, PendingFunctionCall>();
   private readonly consultAbortControllers = new Set<AbortController>();
-  // Latency tracking: reset on each tool response, consumed on first output text delta
-  private lastToolResponseSentAt: number | null = null;
-  private lastToolResponseCallId: string | null = null;
-  private turnFirstDeltaEmitted = false;
   private readonly outputQueue = new RealtimeTalkPcmOutputQueue();
   private readonly emitTalkEvent: ReturnType<typeof createRealtimeTalkEventEmitter>;
+  private readonly tracer: TalkGoogleLiveTracer;
 
   constructor(
     private readonly session: RealtimeTalkJsonPcmWebSocketSessionResult,
     private readonly ctx: RealtimeTalkTransportContext,
   ) {
     this.emitTalkEvent = createRealtimeTalkEventEmitter(ctx, session);
+    this.tracer = new TalkGoogleLiveTracer(ctx.sessionKey);
   }
 
   async start(): Promise<void> {
@@ -116,12 +107,7 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
     }
     const wsUrl = buildGoogleLiveUrl(this.session);
     this.closed = false;
-    talkTrace(this.ctx.sessionKey, {
-      type: "ws.connecting",
-      model: this.session.model,
-      transport: this.session.transport,
-      videoMode: this.ctx.videoMode,
-    });
+    this.tracer.onConnecting(this.session.model, this.session.transport, this.ctx.videoMode);
     this.media = await navigator.mediaDevices.getUserMedia({ audio: true });
     this.inputContext = new AudioContext({ sampleRate: this.session.audio.inputSampleRateHz });
     this.outputContext = new AudioContext({ sampleRate: this.session.audio.outputSampleRateHz });
@@ -131,22 +117,22 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
       if (this.closed) {
         return;
       }
-      talkTrace(this.ctx.sessionKey, { type: "ws.open" });
+      this.tracer.onWsOpen();
       this.send(this.session.initialMessage ?? { setup: {} });
-      talkTrace(this.ctx.sessionKey, { type: "ws.setup_sent" });
+      this.tracer.onWsSetupSent();
       this.startMicrophonePump();
     });
     this.ws.addEventListener("message", (event) => {
       void this.handleMessage(event.data);
     });
     this.ws.addEventListener("close", (event) => {
-      talkTrace(this.ctx.sessionKey, { type: "ws.close", code: event.code, clean: event.wasClean });
+      this.tracer.onWsClose(event.code, event.wasClean);
       if (!this.closed) {
         this.ctx.callbacks.onStatus?.("error", "Realtime connection closed");
       }
     });
     this.ws.addEventListener("error", () => {
-      talkTrace(this.ctx.sessionKey, { type: "ws.error" });
+      this.tracer.onWsError();
       if (!this.closed) {
         this.ctx.callbacks.onStatus?.("error", "Realtime connection failed");
       }
@@ -155,7 +141,7 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
 
   stop(): void {
     if (!this.closed) {
-      talkTrace(this.ctx.sessionKey, { type: "session.stop" });
+      this.tracer.onSessionStop();
       this.emitTalkEvent({ type: "session.closed", final: true });
     }
     this.closed = true;
@@ -223,7 +209,7 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
       return;
     }
     if (message.setupComplete) {
-      talkTrace(this.ctx.sessionKey, { type: "session.ready" });
+      this.tracer.onSessionReady();
       this.ctx.callbacks.onStatus?.("listening");
       this.emitTalkEvent({ type: "session.ready" });
     }
@@ -263,14 +249,7 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
       }
     }
     if (content?.outputTranscription?.text) {
-      if (!this.turnFirstDeltaEmitted && this.lastToolResponseSentAt !== null) {
-        this.turnFirstDeltaEmitted = true;
-        talkTrace(this.ctx.sessionKey, {
-          type: "output.text.first_delta",
-          ttftMs: Date.now() - this.lastToolResponseSentAt,
-          refCallId: this.lastToolResponseCallId,
-        });
-      }
+      this.tracer.onOutputTextDelta();
       this.ctx.callbacks.onTranscript?.({
         role: "assistant",
         text: content.outputTranscription.text,
@@ -306,16 +285,7 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
       }
     }
     if (content?.turnComplete) {
-      if (this.lastToolResponseSentAt !== null) {
-        talkTrace(this.ctx.sessionKey, {
-          type: "turn.complete",
-          totalRttMs: Date.now() - this.lastToolResponseSentAt,
-          refCallId: this.lastToolResponseCallId,
-        });
-        this.lastToolResponseSentAt = null;
-        this.lastToolResponseCallId = null;
-      }
-      this.turnFirstDeltaEmitted = false;
+      this.tracer.onTurnComplete();
       this.emitTalkEvent({ type: "turn.ended", final: true });
     }
     for (const call of message.toolCall?.functionCalls ?? []) {
@@ -324,6 +294,7 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
   }
 
   private playPcm16(base64: string): void {
+    this.tracer.onAudioChunk();
     this.outputQueue.play(base64, this.outputContext, this.session.audio.outputSampleRateHz);
   }
 
@@ -342,7 +313,7 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
       return;
     }
     this.pendingCalls.set(callId, { name, args: call.args ?? {} });
-    talkTrace(this.ctx.sessionKey, { type: "tool.call.received", name, callId });
+    this.tracer.onToolCall(name, callId);
     this.emitTalkEvent({
       type: "tool.call",
       callId,
@@ -365,8 +336,7 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
     if (name !== REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME) {
       return;
     }
-    const consultStart = Date.now();
-    talkTrace(this.ctx.sessionKey, { type: "agent_consult.started", callId });
+    const consultStartedAt = this.tracer.onAgentConsultStarted(callId);
     const abortController = new AbortController();
     this.consultAbortControllers.add(abortController);
     try {
@@ -378,11 +348,7 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
         emitTalkEvent: this.emitTalkEvent,
         submit: (toolCallId, result) => this.submitToolResult(toolCallId, result),
       });
-      talkTrace(this.ctx.sessionKey, {
-        type: "agent_consult.completed",
-        callId,
-        durationMs: Date.now() - consultStart,
-      });
+      this.tracer.onAgentConsultCompleted(callId, consultStartedAt);
     } finally {
       this.consultAbortControllers.delete(abortController);
     }
@@ -412,11 +378,7 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
   }
 
   appendVideoFrame(frame: VideoFrame): void {
-    talkTrace(this.ctx.sessionKey, {
-      type: "video.frame_sent",
-      sizeBytes: Math.round((frame.data.length * 3) / 4),
-      mimeType: frame.mimeType,
-    });
+    this.tracer.onVideoFrameSent(Math.round((frame.data.length * 3) / 4), frame.mimeType);
     this.send({ realtimeInput: { video: { data: frame.data, mimeType: frame.mimeType } } });
   }
 
@@ -433,7 +395,9 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true });
       try {
         const data = await captureFrameFromVideoStream(stream);
-        if (!data) return null;
+        if (!data) {
+          return null;
+        }
         return { data, mimeType: "image/jpeg" };
       } finally {
         stream.getTracks().forEach((t) => t.stop());
@@ -449,17 +413,16 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
     const captureStart = Date.now();
     const frame = await this.captureFrame();
     if (!frame) {
-      talkTrace(this.ctx.sessionKey, { type: "describe_view.camera_unavailable", callId });
+      this.tracer.onDescribeViewUnavailable(callId);
       this.submitToolResult(callId, { error: "Camera not available." });
       return;
     }
-    talkTrace(this.ctx.sessionKey, {
-      type: "describe_view.frame_captured",
+    this.tracer.onDescribeViewCaptured(
       callId,
-      captureMs: Date.now() - captureStart,
-      sizeBytes: Math.round((frame.data.length * 3) / 4),
-      mimeType: frame.mimeType,
-    });
+      Date.now() - captureStart,
+      Math.round((frame.data.length * 3) / 4),
+      frame.mimeType,
+    );
     const pending = this.pendingCalls.get(callId);
     if (!pending) {
       return;
@@ -477,10 +440,7 @@ export class GoogleLiveRealtimeTalkTransport implements RealtimeTalkTransport {
         ],
       },
     });
-    this.lastToolResponseSentAt = Date.now();
-    this.lastToolResponseCallId = callId;
-    this.turnFirstDeltaEmitted = false;
-    talkTrace(this.ctx.sessionKey, { type: "describe_view.response_sent", callId });
+    this.tracer.onDescribeViewSent(callId);
   }
 
   private submitToolResult(callId: string, result: unknown): void {

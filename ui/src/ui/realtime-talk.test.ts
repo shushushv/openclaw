@@ -8,6 +8,7 @@ const {
   relayStop,
   webRtcStart,
   webRtcStop,
+  relaySupportsVideoMode,
   googleCtor,
   relayCtor,
   webRtcCtor,
@@ -18,11 +19,12 @@ const {
   relayStop: vi.fn(),
   webRtcStart: vi.fn(async () => undefined),
   webRtcStop: vi.fn(),
+  relaySupportsVideoMode: vi.fn(() => true),
   googleCtor: vi.fn(function () {
     return { start: googleStart, stop: googleStop };
   }),
   relayCtor: vi.fn(function () {
-    return { start: relayStart, stop: relayStop };
+    return { start: relayStart, stop: relayStop, supportsVideoMode: relaySupportsVideoMode };
   }),
   webRtcCtor: vi.fn(function () {
     return { start: webRtcStart, stop: webRtcStop };
@@ -49,6 +51,8 @@ describe("RealtimeTalkSession", () => {
     googleStop.mockClear();
     relayStart.mockClear();
     relayStop.mockClear();
+    relaySupportsVideoMode.mockReset();
+    relaySupportsVideoMode.mockReturnValue(true);
     webRtcStart.mockClear();
     webRtcStop.mockClear();
     googleCtor.mockClear();
@@ -155,6 +159,39 @@ describe("RealtimeTalkSession", () => {
     expect(relayStop).toHaveBeenCalledTimes(1);
     expect(googleCtor).not.toHaveBeenCalled();
     expect(webRtcCtor).not.toHaveBeenCalled();
+  });
+
+  it("fails visibly when the selected video mode is unsupported", async () => {
+    relaySupportsVideoMode.mockReturnValue(false);
+    const request = vi.fn(async () => ({
+      provider: "google",
+      transport: "gateway-relay",
+      relaySessionId: "relay-1",
+      audio: {
+        inputEncoding: "pcm16",
+        inputSampleRateHz: 24000,
+        outputEncoding: "pcm16",
+        outputSampleRateHz: 24000,
+      },
+    }));
+    const session = new RealtimeTalkSession(
+      { request } as never,
+      "main",
+      {},
+      {
+        videoEnabled: true,
+        videoMode: "passive",
+      },
+    );
+
+    await expect(session.start()).rejects.toThrow(
+      'Video mode "passive" is not supported for google gateway-relay',
+    );
+
+    expect(relayCtor).toHaveBeenCalledTimes(1);
+    expect(relaySupportsVideoMode).toHaveBeenCalledWith("passive");
+    expect(relayStart).not.toHaveBeenCalled();
+    expect(relayStop).toHaveBeenCalledTimes(1);
   });
 
   it("starts the WebRTC transport for canonical WebRTC sessions", async () => {

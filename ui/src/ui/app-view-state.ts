@@ -145,6 +145,7 @@ export type AppViewState = {
   chatInputHistoryIndex: number;
   chatDraftBeforeHistory: string | null;
   realtimeTalkActive: boolean;
+  realtimeTalkMode: "audio" | "video" | null;
   realtimeTalkStatus: RealtimeTalkStatus;
   realtimeTalkDetail: string | null;
   realtimeTalkTranscript: string | null;
@@ -160,6 +161,7 @@ export type AppViewState = {
     silenceDurationMs: string;
     prefixPaddingMs: string;
     reasoningEffort: string;
+    videoMode: string;
   };
   resetRealtimeTalkConversation?: () => void;
   updateRealtimeTalkOptions: (next: Partial<AppViewState["realtimeTalkOptions"]>) => void;
@@ -532,7 +534,7 @@ export type AppViewState = {
     resetChatInputHistoryNavigation: () => void;
     handleSendChat: (messageOverride?: string, opts?: ChatSendOptions) => Promise<void>;
     toggleRealtimeTalk: (
-      opts?: Pick<RealtimeTalkLaunchOptions, "videoEnabled" | "transport">,
+      opts?: Pick<RealtimeTalkLaunchOptions, "videoEnabled" | "transport" | "videoMode">,
     ) => Promise<void>;
     steerQueuedChatMessage: (id: string) => Promise<void>;
     handleAbortChat: (opts?: ChatAbortOptions) => Promise<void>;

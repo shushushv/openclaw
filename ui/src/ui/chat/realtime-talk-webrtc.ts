@@ -9,9 +9,13 @@ import {
   shouldAutoControlRealtimeVoiceAgentText,
   submitRealtimeTalkAgentControl,
   submitRealtimeTalkConsult,
+  videoModeSupported,
   type RealtimeTalkTransport,
   type RealtimeTalkTransportContext,
+  type VideoFrame,
+  type VideoMode,
 } from "./realtime-talk-shared.ts";
+import { TalkWebRtcTracer } from "./realtime-talk-trace.ts";
 
 type RealtimeServerEvent = {
   type?: string;
@@ -20,6 +24,7 @@ type RealtimeServerEvent = {
   name?: string;
   delta?: string;
   transcript?: string;
+  text?: string;
   arguments?: string;
   error?: unknown;
   response?: {
@@ -47,12 +52,14 @@ export class WebRtcSdpRealtimeTalkTransport implements RealtimeTalkTransport {
   private toolBuffers = new Map<string, ToolBuffer>();
   private readonly consultAbortControllers = new Set<AbortController>();
   private readonly emitTalkEvent: ReturnType<typeof createRealtimeTalkEventEmitter>;
+  private readonly tracer: TalkWebRtcTracer;
 
   constructor(
     private readonly session: RealtimeTalkWebRtcSdpSessionResult,
     private readonly ctx: RealtimeTalkTransportContext,
   ) {
     this.emitTalkEvent = createRealtimeTalkEventEmitter(ctx, session);
+    this.tracer = new TalkWebRtcTracer(ctx.sessionKey, session.provider);
   }
 
   async start(): Promise<void> {
@@ -60,6 +67,7 @@ export class WebRtcSdpRealtimeTalkTransport implements RealtimeTalkTransport {
       throw new Error("Realtime Talk requires browser WebRTC and microphone access");
     }
     this.closed = false;
+    this.tracer.onConnecting(this.session.model, this.ctx.videoMode);
     this.peer = new RTCPeerConnection();
     this.audio = document.createElement("audio");
     this.audio.autoplay = true;
@@ -92,6 +100,7 @@ export class WebRtcSdpRealtimeTalkTransport implements RealtimeTalkTransport {
     }
     this.channel = this.peer.createDataChannel("oai-events");
     this.channel.addEventListener("open", () => {
+      this.tracer.onSessionReady();
       this.ctx.callbacks.onStatus?.("listening");
       this.emitTalkEvent({ type: "session.ready" });
     });
@@ -127,6 +136,7 @@ export class WebRtcSdpRealtimeTalkTransport implements RealtimeTalkTransport {
 
   stop(): void {
     if (!this.closed) {
+      this.tracer.onSessionStop();
       this.emitTalkEvent({ type: "session.closed", final: true });
     }
     this.closed = true;
@@ -194,20 +204,16 @@ export class WebRtcSdpRealtimeTalkTransport implements RealtimeTalkTransport {
           }
         }
         return;
+      case "conversation.output_transcript.delta":
+      case "response.output_text.delta":
+      case "response.audio_transcript.delta":
+      case "response.output_audio_transcript.delta":
+        this.emitAssistantTranscript(event, false);
+        return;
+      case "response.output_text.done":
       case "response.audio_transcript.done":
-        if (event.transcript) {
-          this.ctx.callbacks.onTranscript?.({
-            role: "assistant",
-            text: event.transcript,
-            final: true,
-          });
-          this.emitTalkEvent({
-            type: "output.text.done",
-            final: true,
-            itemId: event.item_id,
-            payload: { text: event.transcript },
-          });
-        }
+      case "response.output_audio_transcript.done":
+        this.emitAssistantTranscript(event, true);
         return;
       case "response.function_call_arguments.delta":
         this.bufferToolDelta(event);
@@ -220,6 +226,7 @@ export class WebRtcSdpRealtimeTalkTransport implements RealtimeTalkTransport {
         this.emitTalkEvent({ type: "turn.started", payload: { source: event.type } });
         return;
       case "input_audio_buffer.speech_stopped":
+        this.tracer.onSpeechStopped();
         this.ctx.callbacks.onStatus?.("thinking", "Processing speech");
         this.emitTalkEvent({ type: "input.audio.committed", final: true });
         return;
@@ -230,6 +237,7 @@ export class WebRtcSdpRealtimeTalkTransport implements RealtimeTalkTransport {
         return;
       case "response.cancelled":
       case "response.done":
+        this.tracer.onResponseDone();
         this.responseActive = false;
         this.responseCreateInFlight = false;
         this.ctx.callbacks.onStatus?.("listening", this.extractResponseStatus(event));
@@ -260,6 +268,24 @@ export class WebRtcSdpRealtimeTalkTransport implements RealtimeTalkTransport {
   private extractResponseStatus(event: RealtimeServerEvent): string | undefined {
     const status = event.response?.status;
     return status && status !== "completed" ? `Response ${status}` : undefined;
+  }
+
+  private emitAssistantTranscript(event: RealtimeServerEvent, final: boolean): void {
+    const text = final ? (event.transcript ?? event.text) : event.delta;
+    if (!text) {
+      return;
+    }
+    this.ctx.callbacks.onTranscript?.({
+      role: "assistant",
+      text,
+      final,
+    });
+    this.emitTalkEvent({
+      type: final ? "output.text.done" : "output.text.delta",
+      final,
+      itemId: event.item_id,
+      payload: { text },
+    });
   }
 
   private extractErrorDetail(error: unknown): string {
@@ -311,6 +337,7 @@ export class WebRtcSdpRealtimeTalkTransport implements RealtimeTalkTransport {
     if (!isConsult && !isDescribeView) {
       return;
     }
+    this.tracer.onToolCall(name, callId);
     this.emitTalkEvent({
       type: "tool.call",
       callId,
@@ -323,6 +350,7 @@ export class WebRtcSdpRealtimeTalkTransport implements RealtimeTalkTransport {
     }
     const abortController = new AbortController();
     this.consultAbortControllers.add(abortController);
+    const consultStartedAt = this.tracer.onAgentConsultStarted(callId);
     try {
       await submitRealtimeTalkConsult({
         ctx: this.ctx,
@@ -332,13 +360,33 @@ export class WebRtcSdpRealtimeTalkTransport implements RealtimeTalkTransport {
         emitTalkEvent: this.emitTalkEvent,
         submit: (toolCallId, result) => this.submitToolResult(toolCallId, result),
       });
+      this.tracer.onAgentConsultCompleted(callId, consultStartedAt);
     } finally {
       this.consultAbortControllers.delete(abortController);
     }
   }
 
+  appendVideoFrame(frame: VideoFrame): void {
+    const imageUrl = `data:${frame.mimeType};base64,${frame.data}`;
+    this.send({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_image", image_url: imageUrl }],
+      },
+    });
+    // No response.create — active-mode frame injections must not trigger a new response turn
+    this.tracer.onVideoFrameSent(Math.round((frame.data.length * 3) / 4), frame.mimeType);
+  }
+
+  supportsVideoMode(mode: VideoMode): boolean {
+    return videoModeSupported(this.session.provider, this.session.transport, mode);
+  }
+
   private async handleDescribeViewToolCall(callId: string): Promise<void> {
     if (!this.ctx.videoEnabled) {
+      this.tracer.onDescribeViewUnavailable(callId);
       this.submitToolResult(callId, {
         error:
           "describe_view is only available in Video Talk mode. Please restart using the video button.",
@@ -347,8 +395,15 @@ export class WebRtcSdpRealtimeTalkTransport implements RealtimeTalkTransport {
     }
     this.ctx.callbacks.onStatus?.("thinking");
     try {
+      const captureStart = Date.now();
       const imageBase64 = await captureFrameFromVideoStream(this.videoStream);
       if (imageBase64) {
+        this.tracer.onDescribeViewCaptured(
+          callId,
+          Date.now() - captureStart,
+          Math.round((imageBase64.length * 3) / 4),
+          "image/jpeg",
+        );
         this.send({
           type: "conversation.item.create",
           item: {
@@ -357,13 +412,19 @@ export class WebRtcSdpRealtimeTalkTransport implements RealtimeTalkTransport {
             content: [{ type: "input_image", image_url: `data:image/jpeg;base64,${imageBase64}` }],
           },
         });
+        this.submitToolResult(callId, {
+          result:
+            "Image captured and injected into the conversation. Please describe what you see.",
+        });
+        this.tracer.onDescribeViewSent(callId);
+      } else {
+        this.tracer.onDescribeViewUnavailable(callId);
+        this.submitToolResult(callId, {
+          result: "Camera capture failed. Describe the current situation based on audio context.",
+        });
       }
-      this.submitToolResult(callId, {
-        result: imageBase64
-          ? "Image captured and injected into the conversation. Please describe what you see."
-          : "Camera capture failed. Describe the current situation based on audio context.",
-      });
     } catch {
+      this.tracer.onDescribeViewUnavailable(callId);
       this.submitToolResult(callId, { error: "Camera capture failed" });
     } finally {
       this.ctx.callbacks.onStatus?.("listening");

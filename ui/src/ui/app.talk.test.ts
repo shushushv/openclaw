@@ -33,6 +33,7 @@ describe("OpenClawApp Talk controls", () => {
       connected: boolean;
       lastError: string | null;
       realtimeTalkActive: boolean;
+      realtimeTalkMode: "audio" | "video" | null;
       realtimeTalkDetail: string | null;
       realtimeTalkConversation: Array<{ id: string; role: string; text: string }>;
       realtimeTalkStatus: string;
@@ -46,6 +47,7 @@ describe("OpenClawApp Talk controls", () => {
       connected: { value: true, writable: true },
       lastError: { value: null, writable: true },
       realtimeTalkActive: { value: true, writable: true },
+      realtimeTalkMode: { value: "audio", writable: true },
       realtimeTalkConversation: { value: [], writable: true },
       realtimeTalkDetail: { value: null, writable: true },
       realtimeTalkSession: { value: { stop: staleStop }, writable: true },
@@ -60,6 +62,7 @@ describe("OpenClawApp Talk controls", () => {
     expect(realtimeTalkCtor).toHaveBeenCalledOnce();
     expect(startMock).toHaveBeenCalledOnce();
     expect(stopMock).not.toHaveBeenCalled();
+    expect(app.realtimeTalkMode).toBe("audio");
     expect(app.realtimeTalkStatus).toBe("connecting");
     const session = app.realtimeTalkSession as { start?: unknown; stop?: unknown } | undefined;
     expect(session?.start).toBe(startMock);
@@ -73,6 +76,7 @@ describe("OpenClawApp Talk controls", () => {
       connected: boolean;
       lastError: string | null;
       realtimeTalkActive: boolean;
+      realtimeTalkMode: "audio" | "video" | null;
       realtimeTalkConversation: Array<{ role: string; text: string; isStreaming: boolean }>;
       realtimeTalkDetail: string | null;
       realtimeTalkStatus: string;
@@ -85,6 +89,7 @@ describe("OpenClawApp Talk controls", () => {
       connected: { value: true, writable: true },
       lastError: { value: null, writable: true },
       realtimeTalkActive: { value: false, writable: true },
+      realtimeTalkMode: { value: null, writable: true },
       realtimeTalkConversation: { value: [], writable: true },
       realtimeTalkDetail: { value: null, writable: true },
       realtimeTalkSession: { value: null, writable: true },
@@ -94,6 +99,7 @@ describe("OpenClawApp Talk controls", () => {
     });
 
     await OpenClawApp.prototype.toggleRealtimeTalk.call(app as never);
+    expect(app.realtimeTalkMode).toBe("audio");
     const callbacks = realtimeTalkCtor.mock.calls[0]?.[2] as
       | {
           onTranscript?: (entry: {
@@ -125,6 +131,7 @@ describe("OpenClawApp Talk controls", () => {
       connected: boolean;
       lastError: string | null;
       realtimeTalkActive: boolean;
+      realtimeTalkMode: "audio" | "video" | null;
       realtimeTalkConversation: Array<{ role: string; text: string; isStreaming: boolean }>;
       realtimeTalkDetail: string | null;
       realtimeTalkStatus: string;
@@ -138,6 +145,7 @@ describe("OpenClawApp Talk controls", () => {
       connected: { value: true, writable: true },
       lastError: { value: "previous chat failure", writable: true },
       realtimeTalkActive: { value: false, writable: true },
+      realtimeTalkMode: { value: null, writable: true },
       realtimeTalkConversation: { value: [], writable: true },
       realtimeTalkDetail: { value: null, writable: true },
       realtimeTalkSession: { value: null, writable: true },
@@ -150,6 +158,7 @@ describe("OpenClawApp Talk controls", () => {
 
     expect(app.lastError).toBe("voice provider missing");
     expect(app.chatError).toBe("voice provider missing");
+    expect(app.realtimeTalkMode).toBeNull();
     expect(stopMock).toHaveBeenCalledOnce();
   });
 });

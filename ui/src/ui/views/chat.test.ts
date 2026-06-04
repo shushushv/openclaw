@@ -518,6 +518,7 @@ function createChatProps(
     draft: "",
     queue: [],
     realtimeTalkActive: false,
+    realtimeTalkMode: null,
     realtimeTalkStatus: "idle",
     realtimeTalkDetail: null,
     realtimeTalkTranscript: null,
@@ -934,6 +935,48 @@ describe("chat voice controls", () => {
 
     requireElement(container, '[aria-label="Start Talk"]', "Start Talk button");
     expect(container.querySelector('[aria-label="Voice input"]')).toBeNull();
+  });
+
+  it("keeps Talk and Video Talk controls stable while one mode is active", () => {
+    const audioContainer = renderChatView({
+      realtimeTalkActive: true,
+      realtimeTalkMode: "audio",
+      onToggleRealtimeTalkWithVideo: () => undefined,
+    });
+    const audioStop = requireElement(
+      audioContainer,
+      '[aria-label="Stop Talk"]',
+      "active audio Talk button",
+    ) as HTMLButtonElement;
+    const videoUnavailable = requireElement(
+      audioContainer,
+      '[aria-label="Video Talk unavailable during Talk"]',
+      "disabled Video Talk button",
+    ) as HTMLButtonElement;
+
+    expect(audioStop.disabled).toBe(false);
+    expect(videoUnavailable.disabled).toBe(true);
+    expect(videoUnavailable.getAttribute("title")).toBe("Stop Talk before starting Video Talk");
+
+    const videoContainer = renderChatView({
+      realtimeTalkActive: true,
+      realtimeTalkMode: "video",
+      onToggleRealtimeTalkWithVideo: () => undefined,
+    });
+    const videoStop = requireElement(
+      videoContainer,
+      '[aria-label="Stop Talk"]',
+      "active Video Talk button",
+    ) as HTMLButtonElement;
+    const talkUnavailable = requireElement(
+      videoContainer,
+      '[aria-label="Talk unavailable during Video Talk"]',
+      "disabled audio Talk button",
+    ) as HTMLButtonElement;
+
+    expect(videoStop.disabled).toBe(false);
+    expect(talkUnavailable.disabled).toBe(true);
+    expect(talkUnavailable.getAttribute("title")).toBe("Stop Video Talk before starting Talk");
   });
 
   it("renders editable Talk launch options", () => {

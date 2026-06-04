@@ -990,7 +990,6 @@
   border-radius: var(--radius-md);
   object-fit: cover;
   background: var(--bg-elevated);
-  transform: scaleX(-1);
   box-shadow: var(--shadow-lg);
   cursor: grab;
   z-index: 1000;
